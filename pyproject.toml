@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "korbase"
+version = "0.0.1"
+description = "Async ORM for Postgres, built the Korvex way."
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Maxime Lefevre" }]
+keywords = ["orm", "async", "postgres", "sql", "database"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Framework :: AsyncIO",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+korpg = []
+asyncpg = ["asyncpg>=0.30"]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.400",
+    "pytest>=8.4.2",
+    "ruff>=0.14",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.format]
+exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = [
+    "E501",   # the formatter wraps code; a long string or comment can stay
+    "UP007",  # X | Y: keep annotations readable at runtime on older Pythons
+    "UP045",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["korbase"]
+
+[tool.pyright]
+include = ["korbase"]
+pythonVersion = "3.10"
+typeCheckingMode = "standard"

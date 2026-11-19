@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A new push to a pull request stops the run of the one before.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: Lint and types
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Install
+        run: uv sync
+
+      - name: Ruff
+        run: uv run --no-sync ruff check --output-format=github .
+
+      - name: Python formatting
+        run: uv run --no-sync ruff format --check .
+
+      - name: Pyright
+        run: uv run --no-sync pyright
+
+  test:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.14t"]
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: korbase
+          POSTGRES_PASSWORD: korbase
+          POSTGRES_DB: korbase
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U korbase"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      KORBASE_TEST_DSN: postgresql://korbase:korbase@localhost:5432/korbase
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+
+      - name: Install
+        run: uv sync --python ${{ matrix.python }}
+
+      # On 3.14t, -W error::RuntimeWarning fails the run if any module
+      # turns the GIL back on, which would undo the point.
+      - name: Tests
+        run: uv run --no-sync pytest ${{ endsWith(matrix.python, 't') && '-W error::RuntimeWarning' || '' }}
