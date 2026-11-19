@@ -28,9 +28,13 @@ classifiers = [
 [project.optional-dependencies]
 korpg = []
 asyncpg = ["asyncpg>=0.30"]
+korvex = ["korvex>=1.0.0rc5"]
 
 [dependency-groups]
 dev = [
+    "asyncpg>=0.30",
+    "korvex>=1.0.0rc5",
+    "msgspec",
     "pyright>=1.1.400",
     "pytest>=8.4.2",
     "ruff>=0.14",
