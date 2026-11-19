@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import sys
 import types
 import typing
 from collections.abc import Callable
@@ -97,12 +98,40 @@ class ColumnMeta:
 
 @dataclass(frozen=True)
 class RelMeta:
-    """One relation of a table. Resolution happens later."""
+    """One relation of a table. The target model is resolved on first use."""
 
     name: str
-    target_model: Any
+    target: Any
     fk_field: str
     many: bool
+    owner: Any = None
+    _cache: list[Any] = dataclasses.field(default_factory=list, repr=False, compare=False)
+
+    @property
+    def target_model(self) -> Any:
+        """Return the related model, resolving a forward reference on first use."""
+        if not self._cache:
+            self._cache.append(self._resolve())
+        return self._cache[0]
+
+    def _resolve(self) -> Any:
+        """Evaluate the target in the owner's module; raise `KorbaseError` if it fails."""
+        target = self.target
+        if isinstance(target, type):
+            return target
+        if isinstance(target, typing.ForwardRef):
+            target = target.__forward_arg__
+        module = sys.modules.get(getattr(self.owner, "__module__", ""))
+        scope = dict(vars(module)) if module else {}
+        if self.owner is not None:
+            scope.setdefault(self.owner.__name__, self.owner)
+        try:
+            found = eval(target, scope) if isinstance(target, str) else target  # noqa: S307
+        except Exception:
+            found = None
+        if not isinstance(found, type):
+            raise KorbaseError(f"relation {self.name!r}: cannot resolve target {target!r}")
+        return found
 
 
 @dataclass(frozen=True)
@@ -125,7 +154,7 @@ def _kind_and_names(model: type) -> tuple[str, list[str]]:
     if dataclasses.is_dataclass(model):
         return "dataclass", [f.name for f in dataclasses.fields(model)]
     if typing.is_typeddict(model):
-        return "typeddict", list(typing.get_type_hints(model))
+        return "typeddict", list(_hints(model))
     raise KorbaseError(f"unsupported model kind: {model!r}")
 
 
@@ -147,11 +176,23 @@ def _strip_optional(tp: Any) -> tuple[Any, bool]:
     return tp, False
 
 
-def _relation(name: str, tp: Any, rel: Rel) -> RelMeta:
+def _relation(model: type, name: str, tp: Any, rel: Rel) -> RelMeta:
     """Build a `RelMeta` from a relation field's type."""
     if typing.get_origin(tp) is list:
-        return RelMeta(name, typing.get_args(tp)[0], rel.fk_field, True)
-    return RelMeta(name, tp, rel.fk_field, False)
+        return RelMeta(name, typing.get_args(tp)[0], rel.fk_field, True, model)
+    return RelMeta(name, tp, rel.fk_field, False, model)
+
+
+def _hints(model: type) -> dict[str, Any]:
+    """Return the type hints; names not defined yet become forward references."""
+    local: dict[str, Any] = {}
+    while True:
+        try:
+            return typing.get_type_hints(model, localns=local or None, include_extras=True)
+        except NameError as exc:
+            if not exc.name or exc.name in local:
+                raise
+            local[exc.name] = typing.ForwardRef(exc.name)
 
 
 def _column(name: str, tp: Any, nullable: bool, marks: tuple[Any, ...]) -> ColumnMeta:
@@ -171,7 +212,7 @@ def _column(name: str, tp: Any, nullable: bool, marks: tuple[Any, ...]) -> Colum
 
 def _build(model: type, names: list[str]) -> tuple[list[ColumnMeta], list[RelMeta]]:
     """Split a model's fields into columns and relations."""
-    hints = typing.get_type_hints(model, include_extras=True)
+    hints = _hints(model)
     columns: list[ColumnMeta] = []
     relations: list[RelMeta] = []
     for name in names:
@@ -179,7 +220,7 @@ def _build(model: type, names: list[str]) -> tuple[list[ColumnMeta], list[RelMet
         tp, nullable = _strip_optional(tp)
         rels = [m for m in marks if isinstance(m, Rel)]
         if rels:
-            relations.append(_relation(validate_ident(name), tp, rels[0]))
+            relations.append(_relation(model, validate_ident(name), tp, rels[0]))
         else:
             columns.append(_column(name, tp, nullable, marks))
     return columns, relations

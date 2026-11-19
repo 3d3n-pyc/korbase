@@ -2,23 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, Optional
 
 from korbase._backend import Backend, Conn, Pool
 from korbase._build import named_builder, positional_builder, validating_builder
-from korbase._expr import Param, RelRef
+from korbase._expr import Param
 from korbase._ident import KorbaseError
 from korbase._query import Compiled, _Query, _Select
+from korbase._relations import load_relations
 
 __all__ = ["Database", "Transaction"]
-
-
-async def _load_relations(conn: Conn, rows: list[Any], relrefs: Sequence[RelRef]) -> None:
-    """Load `relrefs` onto `rows`; only an empty list is supported so far."""
-    if relrefs:
-        raise NotImplementedError("relations land in the next task")
 
 
 def _args(compiled: Compiled, params: dict[str, Any]) -> list[Any]:
@@ -71,7 +66,7 @@ class _Runner:
         async with self._conn() as conn:
             if isinstance(query, _Select):
                 rows = await conn.fetch(compiled.sql, args, _row_builder(query, self._validate))
-                await _load_relations(conn, rows, query._loads)
+                await load_relations(conn, rows, query._loads, self._validate)
                 return rows
             if getattr(query, "_ret", False):
                 return await conn.fetch(compiled.sql, args, _row_builder(query, self._validate))
@@ -86,7 +81,7 @@ class _Runner:
         async with self._conn() as conn:
             row = await conn.fetchrow(compiled.sql, args, _row_builder(query, self._validate))
             if row is not None and isinstance(query, _Select):
-                await _load_relations(conn, [row], query._loads)
+                await load_relations(conn, [row], query._loads, self._validate)
             return row
 
     async def fetch(self, sql: str, *args: Any, model: Optional[type] = None) -> list[Any]:
