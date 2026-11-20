@@ -5,15 +5,20 @@ from __future__ import annotations
 import dataclasses
 import inspect
 from collections.abc import Sequence
-from typing import Any
+from contextvars import ContextVar
+from functools import partial
+from typing import Any, Optional
 
 from korbase._backend import RowBuilder
+from korbase._dialect import PG, Dialect, _strip_optional
 from korbase._ident import KorbaseError
 from korbase._meta import TableMeta, table_meta
 
 __all__ = ["positional_builder", "named_builder", "validating_builder"]
 
-_NAMED: dict[tuple[type, tuple[str, ...]], RowBuilder[Any]] = {}
+_NAMED: dict[tuple[type, tuple[str, ...], str], RowBuilder[Any]] = {}
+_PLAIN = (int, float, str, bytes)
+current_dialect: ContextVar[Dialect] = ContextVar("korbase_dialect", default=PG)
 
 
 def _positional_params(model: type) -> list[str]:
@@ -62,8 +67,55 @@ def _maker(model: type, names: Sequence[str]) -> Any:
     return make
 
 
-def positional_builder(meta: TableMeta) -> RowBuilder[Any]:
+def _decoders(meta: TableMeta, names: Sequence[str], dialect: Dialect) -> list[tuple[int, Any]]:
+    """Return `(index, decode)` for the result columns `names` that need decoding."""
+    types = {c.name: _strip_optional(c.python_type) for c in meta.columns}
+    return [
+        (i, partial(dialect.decode_value, types[n]))
+        for i, n in enumerate(names)
+        if n in types and types[n] not in _PLAIN
+    ]
+
+
+def _decoding(build: RowBuilder[Any], pairs: list[tuple[int, Any]]) -> RowBuilder[Any]:
+    """Wrap `build` so the columns in `pairs` are decoded first."""
+    if not pairs:
+        return build
+
+    def decode(row: Sequence[Any]) -> Any:
+        """Decode the stored values of one row, then build the model."""
+        values = list(row)
+        for i, fn in pairs:
+            values[i] = fn(values[i])
+        return build(values)
+
+    return decode
+
+
+def decoding_rows(model: type, names: Sequence[str], dialect: Dialect) -> Any:
+    """Return `decode(row)` giving the row with its stored values converted (raw SQL with a model)."""
+    pairs = _decoders(table_meta(model), names, dialect)
+
+    def decode(row: Sequence[Any]) -> Sequence[Any]:
+        """Convert the stored values of one row."""
+        values = list(row)
+        for i, fn in pairs:
+            values[i] = fn(values[i])
+        return values
+
+    return decode
+
+
+def positional_builder(meta: TableMeta, dialect: Optional[Dialect] = None) -> RowBuilder[Any]:
     """Return a builder for rows in column order, with no validation."""
+    dialect = dialect or current_dialect.get()
+    names = tuple(c.name for c in meta.columns)
+    build: RowBuilder[Any] = _positional(meta)
+    return build if dialect is PG else _decoding(build, _decoders(meta, names, dialect))
+
+
+def _positional(meta: TableMeta) -> RowBuilder[Any]:
+    """Return the undecoded positional builder."""
     model = meta.model
     names = tuple(c.name for c in meta.columns)
     if meta.kind == "typeddict":
@@ -91,13 +143,13 @@ def _field_names(model: type) -> tuple[list[str], set[str]]:
     return names, required
 
 
-def named_builder(model: type, column_names: Sequence[str]) -> RowBuilder[Any]:
+def named_builder(model: type, column_names: Sequence[str], dialect: Dialect = PG) -> RowBuilder[Any]:
     """Return a builder mapping result columns by name to `model` fields.
 
     Extra columns are ignored. Raises `KorbaseError` if a required field
     has no column.
     """
-    key = (model, tuple(column_names))
+    key = (model, tuple(column_names), dialect.name)
     cached = _NAMED.get(key)
     if cached is not None:
         return cached
@@ -116,13 +168,18 @@ def named_builder(model: type, column_names: Sequence[str]) -> RowBuilder[Any]:
             return {c: row[i] for i, c in picks}
         return make([row[i] for i in idx])
 
-    _NAMED[key] = build
-    return build
+    result: RowBuilder[Any] = build
+    if dialect is not PG:
+        result = _decoding(build, _decoders(table_meta(model), column_names, dialect))
+    _NAMED[key] = result
+    return result
 
 
-def validating_builder(meta: TableMeta) -> RowBuilder[Any]:
+def validating_builder(meta: TableMeta, dialect: Optional[Dialect] = None) -> RowBuilder[Any]:
     """Return a builder that validates each row with `msgspec.convert`."""
     import msgspec
+
+    dialect = dialect or current_dialect.get()
 
     names = tuple(c.name for c in meta.columns)
     model = meta.model
@@ -131,4 +188,4 @@ def validating_builder(meta: TableMeta) -> RowBuilder[Any]:
         """Validate one row and build the model."""
         return msgspec.convert(dict(zip(names, row, strict=True)), model, from_attributes=True)
 
-    return build
+    return build if dialect is PG else _decoding(build, _decoders(meta, names, dialect))

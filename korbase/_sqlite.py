@@ -10,6 +10,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, TypeVar
 
 from korbase._backend import M, Pool, RowBuilder
+from korbase._dialect import SQLITE
 
 __all__ = ["SqliteBackend"]
 
@@ -60,6 +61,11 @@ def _split_statements(sql: str) -> list[str]:
     return statements
 
 
+def _encode(args: Sequence[object]) -> tuple[Any, ...]:
+    """Convert every argument to what SQLite stores."""
+    return tuple(SQLITE.encode_param(a) for a in args)
+
+
 class _SqliteConn:
     """A `Conn` over one sqlite3 connection that lives on its own thread."""
 
@@ -107,8 +113,10 @@ class _SqliteConn:
     async def fetch_columns(self, sql: str, args: Sequence[object]) -> tuple[Sequence[str], list[Sequence[object]]]:
         """Run `sql`; return the column names and the rows as tuples."""
 
+        bound = _encode(args)
+
         def work() -> tuple[Sequence[str], list[Sequence[object]]]:
-            cur = self._conn().execute(sql, tuple(args))
+            cur = self._conn().execute(sql, bound)
             names = [d[0] for d in cur.description or ()]
             return names, cur.fetchall()
 
@@ -117,8 +125,10 @@ class _SqliteConn:
     async def execute(self, sql: str, args: Sequence[object]) -> str:
         """Run `sql` and return a Postgres-like status tag."""
 
+        bound = _encode(args)
+
         def work() -> str:
-            cur = self._conn().execute(sql, tuple(args))
+            cur = self._conn().execute(sql, bound)
             cur.fetchall()
             return _tag(sql, cur.rowcount)
 
@@ -206,6 +216,8 @@ class _SqlitePool:
 
 class SqliteBackend:
     """Backend on the standard library `sqlite3`. Needs SQLite 3.35 or later."""
+
+    dialect = SQLITE
 
     async def connect(self, dsn: str, *, size: int = 1, busy_timeout_ms: int = 5000, **opts: Any) -> Pool:
         """Open a pool on `sqlite:///path.db` or `sqlite::memory:`.
