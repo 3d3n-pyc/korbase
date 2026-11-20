@@ -23,6 +23,10 @@ def _set(row: Any, name: str, value: Any) -> None:
     """Set field `name` of a model of any kind, even a frozen one."""
     if isinstance(row, dict):
         row[name] = value
+    elif hasattr(type(row), "__struct_fields__"):
+        import msgspec  # Python < 3.13 refuses object.__setattr__ on a Struct
+
+        msgspec.structs.force_setattr(row, name, value)
     else:
         object.__setattr__(row, name, value)
 
