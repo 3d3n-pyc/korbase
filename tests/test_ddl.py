@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import enum
+import pathlib
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
@@ -14,9 +15,11 @@ import pytest
 
 from korbase._asyncpg import AsyncpgBackend
 from korbase._ddl import create_all, create_all_sql, create_table_sql, render_literal
+from korbase._dialect import SQLITE
 from korbase._ident import KorbaseError
 from korbase._inspect import inspect
 from korbase._meta import FK, PK, Default, Index, SqlType, Unique, table, table_meta
+from korbase._sqlite import SqliteBackend
 
 SCHEMA = "korbase_test_ddl"
 
@@ -236,3 +239,109 @@ def test_literal_safe_without_standard_conforming_strings(dsn: str) -> None:
             await pool.close()
 
     assert asyncio.run(main()) == "a\\'; DROP TABLE x; --"
+
+
+def test_render_literal_sqlite() -> None:
+    """SQLite literals: bools are 0/1, only the single quote is doubled."""
+    assert render_literal(True, SQLITE) == "1"
+    assert render_literal(False, SQLITE) == "0"
+    assert render_literal("it's", SQLITE) == "'it''s'"
+    assert render_literal("a\\b", SQLITE) == "'a\\b'"
+    assert render_literal(3, SQLITE) == "3"
+    assert render_literal(1.5, SQLITE) == "1.5"
+    with pytest.raises(KorbaseError):
+        render_literal("a\x00b", SQLITE)
+
+
+def test_create_table_sql_sqlite_exact() -> None:
+    """SQLite: INTEGER PRIMARY KEY rowid alias, SqlType as written, plain defaults."""
+    stmts = create_table_sql(table_meta(Thing), SQLITE)
+    assert stmts[0] == (
+        'CREATE TABLE "things" (\n'
+        '    "id" INTEGER PRIMARY KEY,\n'
+        '    "name" varchar(80) NOT NULL,\n'
+        '    "price" numeric(10, 2) NOT NULL DEFAULT 0,\n'
+        '    "qty" INTEGER NOT NULL DEFAULT 5,\n'
+        '    "ratio" REAL,\n'
+        '    "ok" INTEGER NOT NULL DEFAULT 1,\n'
+        '    "raw" BLOB NOT NULL,\n'
+        '    "uid" TEXT NOT NULL,\n'
+        '    "at" TEXT NOT NULL DEFAULT now(),\n'
+        '    "day" TEXT NOT NULL,\n'
+        '    "clock" TEXT NOT NULL,\n'
+        '    "meta" TEXT NOT NULL,\n'
+        '    "tags" TEXT NOT NULL,\n'
+        '    "color" TEXT NOT NULL,\n'
+        "    \"note\" TEXT NOT NULL DEFAULT 'it''s',\n"
+        '    CONSTRAINT "things_name_key" UNIQUE ("name")\n'
+        ")"
+    )
+    assert stmts[1:] == [
+        'CREATE UNIQUE INDEX "things_name_idx" ON "things" ("name")',
+        'CREATE INDEX "things_custom" ON "things" ("name", "qty")',
+    ]
+
+
+def test_create_all_sql_sqlite() -> None:
+    """SQLite: foreign keys are inline, composite keys are table constraints."""
+    stmts = create_all_sql([Thing, Link], SQLITE)
+    assert stmts[0] == (
+        'CREATE TABLE "links" (\n'
+        '    "thing_id" INTEGER NOT NULL,\n'
+        '    "other" INTEGER NOT NULL,\n'
+        '    CONSTRAINT "links_pkey" PRIMARY KEY ("thing_id", "other"),\n'
+        '    CONSTRAINT "links_thing_id_fkey" FOREIGN KEY ("thing_id") REFERENCES "things" ("id") ON DELETE CASCADE\n'
+        ")"
+    )
+    assert not any(s.startswith("ALTER") for s in stmts)
+    assert create_all_sql([Link, Thing], SQLITE) == stmts
+
+
+@table("things", indexes=(Index("name", unique=True), Index("name", "qty", name="things_custom")))
+@dataclass
+class LiteThing:
+    """The columns of `Thing` that SQLite can run, with a SQLite default expression."""
+
+    id: Annotated[int, PK()]
+    name: Annotated[str, SqlType("varchar(80)"), Unique()]
+    qty: Annotated[int, Default(5)]
+    ratio: float | None
+    ok: Annotated[bool, Default(True)]
+    at: Annotated[datetime.datetime, Default(sql="CURRENT_TIMESTAMP")]
+    note: Annotated[str, Default("it's")]
+
+
+def test_create_all_on_sqlite(tmp_path: pathlib.Path) -> None:
+    """create_all builds the tables on a SQLite file and PRAGMA shows what was declared."""
+
+    async def main() -> dict[str, Any]:
+        pool = await SqliteBackend().connect(f"sqlite:///{tmp_path / 'ddl.db'}")
+        try:
+            async with pool.acquire() as conn:
+                await create_all(conn, [LiteThing, Link], dialect=SQLITE)
+                with pytest.raises(KorbaseError):
+                    await create_all(conn, [LiteThing], "other", SQLITE)
+                out: dict[str, Any] = {}
+                for key, sql in {
+                    "cols": "PRAGMA table_xinfo(things)",
+                    "fks": "PRAGMA foreign_key_list(links)",
+                    "idx": "PRAGMA index_list(things)",
+                }.items():
+                    names, rows = await conn.fetch_columns(sql, [])
+                    out[key] = [dict(zip(names, r, strict=True)) for r in rows]
+                return out
+        finally:
+            await pool.close()
+
+    res = asyncio.run(main())
+    cols = {c["name"]: c for c in res["cols"]}
+    assert cols["id"]["type"] == "INTEGER" and cols["id"]["pk"] == 1
+    assert cols["at"]["dflt_value"] == "CURRENT_TIMESTAMP"
+    assert cols["name"]["type"] == "varchar(80)" and cols["name"]["notnull"] == 1
+    assert cols["ratio"]["notnull"] == 0 and cols["ok"]["dflt_value"] == "1"
+    assert cols["note"]["dflt_value"] == "'it''s'"
+    (fk,) = res["fks"]
+    assert (fk["table"], fk["from"], fk["to"], fk["on_delete"]) == ("things", "thing_id", "id", "CASCADE")
+    idx = {i["name"]: i for i in res["idx"]}
+    assert idx["things_name_idx"]["unique"] == 1 and idx["things_custom"]["unique"] == 0
+    assert "things_name_key" in idx or "sqlite_autoindex_things_1" in idx
