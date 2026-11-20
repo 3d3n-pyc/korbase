@@ -14,7 +14,7 @@ import pytest
 
 from korbase import Database
 from korbase._ident import KorbaseError
-from korbase.migrate import apply, collect_models, create_all, make, status
+from korbase.migrate import apply, collect_models, create_all, dev, make, status
 
 V1 = """
 from typing import Annotated
@@ -179,3 +179,70 @@ def test_cli_errors_are_one_line(dsn: str, tmp_path: Path) -> None:
     assert r.returncode == 1
     assert r.stderr.startswith("error: ") and "Traceback" not in r.stderr
     assert dsn not in r.stderr
+
+
+def test_make_scopes_to_models(dsn: str, tmp_path: Path) -> None:
+    """Unrelated tables are kept by default; all_tables proposes a flagged drop."""
+    d = tmp_path / "mig"
+
+    async def body(db: Database) -> None:
+        """Create an unrelated table, then compare both ways."""
+        await db.execute("CREATE TABLE mg_other (id int PRIMARY KEY)")
+        m = _models(tmp_path, "mg_s1", V1)
+        f = await make(db, m, d, "init")
+        assert f is not None and "mg_other" not in f.read_text()
+        await apply(db, d)
+        assert await make(db, m, d, "again") is None
+        g = await make(db, m, d, "all", all_tables=True)
+        assert g is not None
+        text = g.read_text()
+        assert "DROP TABLE" in text and "mg_other" in text and "-- korbase:review" in text
+
+    _run(dsn, body)
+
+
+def test_removed_model_dropped_with_all_tables(dsn: str, tmp_path: Path) -> None:
+    """Removing a model and using all_tables proposes dropping its table."""
+    d = tmp_path / "mig"
+    other = V1.replace("mg_item", "mg_gone")
+
+    async def body(db: Database) -> None:
+        """Create two models' tables, then keep only one."""
+        both = _models(tmp_path, "mg_r1", V1) + _models(tmp_path, "mg_r2", other)
+        await make(db, both, d, "init")
+        await apply(db, d)
+        keep = _models(tmp_path, "mg_r3", V1)
+        assert await make(db, keep, d, "x") is None
+        f = await make(db, keep, d, "drop", all_tables=True)
+        assert f is not None and "DROP TABLE" in f.read_text() and "mg_gone" in f.read_text()
+
+    _run(dsn, body)
+
+
+def test_dev_applies_safe_change(dsn: str, tmp_path: Path) -> None:
+    """dev writes and applies a safe change; a second run finds nothing."""
+    d = tmp_path / "mig"
+
+    async def body(db: Database) -> None:
+        """Run dev twice."""
+        m = _models(tmp_path, "mg_d1", V1)
+        f = await dev(db, m, d)
+        assert f is not None and await status(db, d) == [(f.name, "applied")]
+        assert await db.fetch("SELECT 1 FROM pg_tables WHERE tablename = 'mg_item'")
+        assert await dev(db, m, d) is None
+
+    _run(dsn, body)
+
+
+def test_dev_stops_on_review(dsn: str, tmp_path: Path) -> None:
+    """dev refuses a flagged change and applies nothing."""
+    d = tmp_path / "mig"
+
+    async def body(db: Database) -> None:
+        """Create, then drop a column through dev."""
+        await dev(db, _models(tmp_path, "mg_e1", V1), d)
+        with pytest.raises(KorbaseError, match="korbase:review"):
+            await dev(db, _models(tmp_path, "mg_e3", V3), d)
+        assert [s for _, s in await status(db, d)] == ["applied", "pending"]
+
+    _run(dsn, body)

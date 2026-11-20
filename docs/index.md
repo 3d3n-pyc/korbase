@@ -32,7 +32,7 @@ import asyncio
 from typing import Annotated
 
 import msgspec
-from korbase import PK, Database, cols, insert, param, select, table
+from korbase import PK, Database, insert, select, table
 
 
 @table("authors")
@@ -43,9 +43,9 @@ class Author(msgspec.Struct):
 
 async def main() -> None:
     async with await Database.connect("postgresql://user:password@localhost/scratch") as db:
-        await db.run(insert(Author).values(name="Ada"))
-        found = await db.run(select(Author).where(cols(Author).name == param("n")), n="Ada")
-        print(found)  # [Author(id=1, name='Ada')]
+        [ada] = await db.run(insert(Author).values(name="Ada"))  # the new row, as an Author
+        found = await db.run(select(Author).where(name="Ada"))  # list[Author]
+        print(ada, found)  # Author(id=1, name='Ada') [Author(id=1, name='Ada')]
 
 
 asyncio.run(main())
@@ -56,8 +56,14 @@ asyncio.run(main())
 - **Plain models.** msgspec Structs, dataclasses and TypedDicts work with
   `@table("name")`. Markers such as `PK()`, `FK(...)` and `Rel(...)` go
   inside `Annotated[...]`.
-- **Queries compile once.** Every value is a `$n` parameter, passed by name
-  with `param("name")`. A write with no `where()` is refused.
+- **Typed results.** `run(select(Post))` is a `list[Post]` and `first(...)`
+  is `Post | None`, so your editor knows every field. An insert returns its
+  row; an update or delete returns the number of rows changed.
+- **Plain queries.** `.where(author_id=1)`, `.where(cols(Post).title.like("H%"))`.
+  Every value is sent as a `$n` parameter, never pasted into the SQL. A write
+  with no `where()` is refused.
+- **Queries compile once.** Build one at module level with `param("name")`
+  for the values that change, and reuse it.
 - **Relations load on request.** `.load(...)` adds one query per relation.
 - **Reviewed SQL migrations.** `make` writes the SQL, you read it, `apply`
   runs it. A change that drops data is refused until you review it.

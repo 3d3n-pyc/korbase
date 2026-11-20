@@ -3,14 +3,30 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 import pytest
 
 from korbase._expr import Param, Value, cols, param
 from korbase._ident import KorbaseError
 from korbase._meta import PK, Default, table
-from korbase._query import delete, insert, select, update, upsert
+from korbase._query import (
+    Delete,
+    DeleteReturning,
+    Insert,
+    Select,
+    Update,
+    UpdateReturning,
+    Upsert,
+    delete,
+    insert,
+    select,
+    update,
+    upsert,
+)
+
+if TYPE_CHECKING:
+    from typing import assert_type
 
 
 @table("users")
@@ -68,12 +84,12 @@ def test_limit_rejects_junk() -> None:
 
 def test_insert_default_skips_defaulted() -> None:
     c = insert(User).compile()
-    assert c.sql == 'INSERT INTO "users" ("name", "age") VALUES ($1, $2)'
+    assert c.sql == 'INSERT INTO "users" ("name", "age") VALUES ($1, $2) RETURNING "id", "name", "age"'
     assert [s.name for s in c.slots] == ["name", "age"]  # type: ignore[union-attr]
 
 
 def test_insert_values_returning() -> None:
-    c = insert(User).values(name=param("n"), age=3).returning().compile()
+    c = insert(User).values(name=param("n"), age=3).compile()
     assert c.sql == ('INSERT INTO "users" ("name", "age") VALUES ($1, $2) RETURNING "id", "name", "age"')
     assert isinstance(c.slots[1], Value) and c.slots[1].value == 3
 
@@ -108,14 +124,14 @@ def test_upsert() -> None:
     q = upsert(User).values(id=param("id"), name=param("n"), age=1).on_conflict("id")
     assert q.compile().sql == (
         'INSERT INTO "users" ("id", "name", "age") VALUES ($1, $2, $3) '
-        'ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name", "age" = EXCLUDED."age"'
+        'ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name", "age" = EXCLUDED."age" '
+        'RETURNING "id", "name", "age"'
     )
-    assert q.returning().compile().sql.endswith('"age" = EXCLUDED."age" RETURNING "id", "name", "age"')
 
 
 def test_upsert_do_nothing_and_guard() -> None:
     c = upsert(User).values(id=param("id")).on_conflict("id").compile()
-    assert c.sql.endswith('ON CONFLICT ("id") DO NOTHING')
+    assert c.sql.endswith('ON CONFLICT ("id") DO NOTHING RETURNING "id", "name", "age"')
     with pytest.raises(KorbaseError):
         upsert(User).compile()
 
@@ -145,10 +161,10 @@ def test_unknown_column() -> None:
 
 def test_upsert_never_sets_pk() -> None:
     sql = upsert(User).on_conflict("name").compile().sql
-    assert sql.endswith('ON CONFLICT ("name") DO UPDATE SET "age" = EXCLUDED."age"')
+    assert 'ON CONFLICT ("name") DO UPDATE SET "age" = EXCLUDED."age"' in sql
     assert 'SET "id"' not in sql
     sql = upsert(User).values(id=1, name="a").on_conflict("name").compile().sql
-    assert sql.endswith('ON CONFLICT ("name") DO NOTHING')
+    assert 'ON CONFLICT ("name") DO NOTHING' in sql
 
 
 @pytest.mark.parametrize("bad", [True, 1, "x", None])
@@ -175,5 +191,56 @@ def test_insert_default_values() -> None:
     class Tick:
         id: Annotated[int, PK(), Default()]
 
-    assert insert(Tick).compile().sql == 'INSERT INTO "tick" DEFAULT VALUES'
-    assert insert(Tick).returning().compile().sql == ('INSERT INTO "tick" DEFAULT VALUES RETURNING "id"')
+    assert insert(Tick).compile().sql == 'INSERT INTO "tick" DEFAULT VALUES RETURNING "id"'
+
+
+def test_update_delete_returning() -> None:
+    u = update(User).set(age=1).where(U.id == 1)
+    assert u.compile().sql == 'UPDATE "users" SET "age" = $1 WHERE "users"."id" = $2'
+    assert u.returning().compile().sql.endswith('"users"."id" = $2 RETURNING "id", "name", "age"')
+    d = delete(User).where(U.id == 1)
+    assert d.compile().sql == 'DELETE FROM "users" WHERE "users"."id" = $1'
+    assert d.returning().compile().sql.endswith('RETURNING "id", "name", "age"')
+    assert not u.returns_rows and u.returning().returns_rows
+    assert not d.returns_rows and d.returning().returns_rows
+    assert select(User).returns_rows and insert(User).returns_rows
+    assert select(User).model is User
+
+
+def test_where_several_and_keywords() -> None:
+    c = select(User).where(U.age > 1, U.id < 9).compile()
+    assert c.sql.endswith('WHERE ("users"."age" > $1 AND "users"."id" < $2)')
+    c = select(User).where(U.age > 1, name="bob", id=param("i")).compile()
+    assert c.sql.endswith('WHERE (("users"."age" > $1 AND "users"."name" = $2) AND "users"."id" = $3)')
+    assert isinstance(c.slots[2], Param) and c.slots[2].name == "i"
+    c = update(User).set(age=1).where(name="a").compile()
+    assert c.sql.endswith('WHERE "users"."name" = $2')
+    assert delete(User).where(id=1).compile().sql == 'DELETE FROM "users" WHERE "users"."id" = $1'
+
+
+def test_where_none_keyword_is_null() -> None:
+    sql = select(User).where(age=None).compile().sql
+    assert sql.endswith('WHERE "users"."age" IS NULL')
+
+
+def test_where_keyword_errors() -> None:
+    with pytest.raises(KorbaseError, match="nope"):
+        select(User).where(nope=1)
+    with pytest.raises(TypeError):
+        select(User).where()
+    with pytest.raises(TypeError):
+        delete(User).where()
+    with pytest.raises(KorbaseError):
+        delete(User).compile()
+
+
+def test_builder_types() -> None:
+    if TYPE_CHECKING:
+        assert_type(select(User), Select[User])
+        assert_type(select(User).where(id=1).limit(1), Select[User])
+        assert_type(insert(User).values(name="a"), Insert[User])
+        assert_type(upsert(User).on_conflict("id"), Upsert[User])
+        assert_type(update(User).set(age=1).where(id=1), Update[User])
+        assert_type(update(User).returning(), UpdateReturning[User])
+        assert_type(delete(User).where(id=1), Delete[User])
+        assert_type(delete(User).returning(), DeleteReturning[User])

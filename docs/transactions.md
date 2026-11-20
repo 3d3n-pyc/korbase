@@ -21,7 +21,7 @@ from typing import Annotated
 
 import msgspec
 
-from korbase import PK, Database, cols, insert, param, select, table, update
+from korbase import PK, Database, insert, select, table, update
 
 
 @table("users")
@@ -32,14 +32,14 @@ class User(msgspec.Struct):
 
 async def main() -> None:
     db = await Database.connect(os.environ["KORBASE_DSN"])
-    u = cols(User)
     await db.execute("CREATE TABLE IF NOT EXISTS users (id integer PRIMARY KEY, name text NOT NULL)")
 
     async with db.transaction() as tx:
         await tx.run(insert(User).values(id=3, name="Cy"))
-        await tx.run(update(User).set(name="Carl").where(u.id == 3))
+        changed = await tx.run(update(User).set(name="Carl").where(id=3))
+        print(changed)  # 1, the number of rows updated
 
-    carl = await db.first(select(User).where(u.name == param("name")), name="Carl")
+    carl = await db.first(select(User).where(name="Carl"))
     print(carl)  # User(id=3, name='Carl')
 
     await db.execute("DROP TABLE users")
@@ -60,15 +60,29 @@ asyncio.run(main())
 
 Build a query, then run it with one of these methods:
 
-- `db.run(query, **params)` returns a list of models for a select, and for an insert or upsert with `.returning()`. Other writes return the command tag, such as `"UPDATE 1"`.
-- `db.first(query, **params)` returns the first model, or `None`. It works on a select, or on a write with `.returning()`. Other queries raise `KorbaseError`.
+- `db.run(query, **params)` returns a list of models for a select, an insert and an upsert, which always return the rows they wrote. An update or a delete returns the number of rows it changed, as an `int`. Add `.returning()` to an update or a delete to get the rows instead.
+- `db.first(query, **params)` returns the first model, or `None`. It works on any query that returns rows. An update or a delete without `.returning()` raises `KorbaseError`.
 
-Values are passed as named parameters with `param("name")`. Every parameter must be given, and no extra one may be. A missing or extra name raises `KorbaseError` before anything is sent.
+The result is typed: `run(select(User))` is a `list[User]` for your type checker, and `first(...)` is `User | None`.
+
+Plain values go straight into the query. When the value is only known at run time, use a named parameter, `param("name")`, and give it as a keyword to `run`. Every parameter must be given, and no extra one may be. A missing or extra name raises `KorbaseError` before anything is sent.
 
 ```python
+from korbase import cols, delete, param
+
+u = cols(User)
+
+new = await db.run(insert(User).values(id=4, name="Dee"))  # [User(id=4, name='Dee')]
+n = await db.run(update(User).set(name="Bob").where(id=4))  # 1
+gone = await db.run(delete(User).where(id=4).returning())  # [User(id=4, name='Bob')]
+
 rows = await db.run(select(User).where(u.id >= param("min_id")), min_id=1)
-tag = await db.run(update(User).set(name="Bob").where(u.id == param("id")), id=2)  # "UPDATE 1"
+count = await db.run(update(User).set(name="Bob").where(u.id == param("id")), id=2)  # 1
 ```
+
+`where` takes conditions, keyword pairs, or both, all joined with AND: `.where(u.id > 1, name="Bob")`. A keyword set to `None` means `IS NULL`.
+
+A `param` compared with `==`, `!=` or `in_()` cannot be given `None`: such a comparison never matches NULL, so `run` raises `KorbaseError` instead of returning nothing. Use `.where(column=None)` or `.is_null()` for a NULL test.
 
 ## Transactions
 
@@ -112,7 +126,7 @@ users = await db.fetch("SELECT * FROM users", model=User)  # list of models
 one = await db.fetchrow("SELECT * FROM users WHERE id = $1", 1, model=User)  # model or None
 ```
 
-`fetch` with no rows returns `[]`, and `fetchrow` returns `None`. `execute` returns the command tag. The same methods exist on `Transaction`.
+`fetch` with no rows returns `[]`, and `fetchrow` returns `None`. `execute` returns the command tag. With `model=User` the result is typed as `list[User]` or `User | None`. The same methods exist on `Transaction`.
 
 ## Going further
 

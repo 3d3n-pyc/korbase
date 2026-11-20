@@ -30,7 +30,7 @@ In korbase: a field of a model is a column, and `cols(User).name` is that column
 
 SQL text built from your query code, with placeholders where the values go. It is built once, and then reused for every run, which is faster than building it each time.
 
-In korbase: a builder compiles itself the first time it runs. See [Compiled once](queries.md#compiled-once-with-slots).
+In korbase: a builder compiles itself the first time it runs. See [Compiled once](queries.md#parameters-queries-built-once).
 
 ## Connection pool
 
@@ -54,7 +54,7 @@ In korbase: `Index("author_id", "created_at")` in `@table(..., indexes=(...))`. 
 
 A saved, numbered change to the database structure, like "create the users table". Applied in order, migrations bring any database to the same shape, and they stay in version control.
 
-In korbase: a `0001_name.sql` file, written by `make` and run by `apply`. See [Migrations](migrations.md).
+In korbase: a `0001_name.sql` file, written by `make` and run by `apply`. For local work, `dev` does both in one step. See [Migrations](migrations.md).
 
 ## Model
 
@@ -72,13 +72,13 @@ In korbase: `.load(...)` fills a relation for all the rows with one extra query.
 
 The database's value for "no value". It is not zero and not an empty string. A column that allows it is nullable.
 
-In korbase: a field typed `Optional[T]` is nullable. Any other field is `NOT NULL`. See [Nullability](models.md#nullability).
+In korbase: a field typed `Optional[T]` is nullable. Any other field is `NOT NULL`. In a query, `.where(note=None)` or `.is_null()` tests for it, because `== NULL` never matches. See [Nullability](models.md#nullability).
 
 ## Parameter
 
 A value sent to the database separately from the SQL text. The SQL holds a placeholder (`$1`), and the value travels on its own.
 
-In korbase: `param("name")` marks a value that you give when the query runs. See [Columns and parameters](queries.md#run-a-query).
+In korbase: `param("name")` marks a value that you give when the query runs. A plain value, as in `.where(name="Ada")`, is sent the same way. A `param` compared with `==` cannot be `None`. See [Columns and parameters](queries.md#run-a-query).
 
 ## Primary key
 
@@ -114,7 +114,7 @@ In korbase: a nested `tx.transaction()` is a savepoint. See [Transactions](trans
 
 Two meanings. The shape of a database: its tables, columns, keys and indexes. Also, in Postgres, a named folder of tables inside a database. Tables go in `public` by default.
 
-In korbase: `make` compares your models with the `public` schema. See [How make works](migrations.md#going-further).
+In korbase: `make` compares your models with their tables in the `public` schema, and leaves other tables alone unless you pass `--all-tables`. See [How make works](migrations.md#going-further).
 
 ## Scratch schema
 

@@ -49,15 +49,17 @@ A `Rel("fk_field")` field is not a column: it holds related rows filled by
 
 Build queries at module level, once. `cols(Model)` gives columns,
 `param("x")` a named parameter filled at run time. Combine conditions with
-`&`, `|`, `~`.
+`&`, `|`, `~`. `.where(*conditions, **equals)` ANDs several conditions and
+`column=value` pairs; a plain value is fine when it is fixed, and a keyword
+set to `None` means `IS NULL`.
 
 ```python
 from korbase import cols, delete, insert, param, select, update, upsert
 
 b = cols(Book)
-BY_AUTHOR = select(Book).where(b.author_id == param("a")).order_by(b.id.asc()).limit(10)
-NEW_BOOK = insert(Book).values(title=param("t"), author_id=param("a")).returning()
-RETITLE = update(Book).set(title=param("t")).where(b.id == param("id"))
+BY_AUTHOR = select(Book).where(b.title != "", author_id=param("a")).order_by(b.id.asc()).limit(10)
+NEW_BOOK = insert(Book).values(title=param("t"), author_id=param("a"))
+RETITLE = update(Book).set(title=param("t")).where(id=param("id"))
 UNTITLED = delete(Book).where(b.title.is_null() | (b.title == ""))
 ```
 
@@ -70,13 +72,18 @@ call `.all_rows()`; `insert` and `upsert` need `.values(...)`.
 
 ```python
 db = await Database.connect(dsn)            # a pool; `async with` closes it
-books = await db.run(BY_AUTHOR, a=1)        # select: a list of models
-book = await db.first(NEW_BOOK, t="Dune", a=1)  # first row or None
-await db.run(RETITLE, t="Dune II", id=1)    # other writes: the command tag
+books = await db.run(BY_AUTHOR, a=1)        # select: list[Book]
+[book] = await db.run(NEW_BOOK, t="Dune", a=1)  # insert/upsert: the new rows
+one = await db.first(BY_AUTHOR, a=1)        # first row or None
+n = await db.run(RETITLE, t="Dune II", id=1)    # update/delete: an int row count
+gone = await db.run(delete(Book).where(id=1).returning())  # rows instead of a count
 ```
 
-`run` and `first` take parameters as keywords. Inserts and upserts return
-rows only with `.returning()`.
+`run` and `first` take parameters as keywords. Results are typed by the
+model. `insert` and `upsert` always return rows. `update` and `delete`
+return the number of rows changed; add `.returning()` to get the rows
+(`first` needs it too). A `param` compared with `==`, `!=` or `in_()` cannot
+be `None`: `run` raises. Use `.where(col=None)` or `.is_null()`.
 
 ## Relations
 
@@ -103,12 +110,19 @@ values as `$1` arguments, never format them into the string.
 tests. For real databases use files:
 
 1. `KORBASE_DSN=... python -m korbase.migrate make --models app.models --dir migrations -m add_books`
-   compares the models with the database and writes `0001_add_books.sql`.
+   compares the models' tables with the database and writes
+   `0001_add_books.sql`. Other tables are ignored; add `--all-tables` to
+   compare the whole schema, which is the only way to drop the table of a
+   removed model.
 2. Review the file. Lines `-- korbase:review ...` flag dangerous changes
    (dropped data, new NOT NULL). Edit the SQL if needed, then delete each
    review line once you have read it: `apply` refuses files that keep one.
 3. `python -m korbase.migrate apply --dir migrations` runs pending files;
    `status` lists them.
+
+For local work, `python -m korbase.migrate dev --models app.models --dir
+migrations` runs make then apply in one step (stops on a review line).
+Never use it on production.
 
 Never edit or delete an applied file: `apply` refuses a changed one. Fix
 mistakes with a new migration. Prefer `KORBASE_DSN` to `--dsn` (visible in
@@ -137,8 +151,13 @@ async def get_book(id: int, tx=Depends(kdb.transaction)):
 
 - `and` / `or` / `not` on conditions: they raise. Use `&`, `|`, `~`, and
   parenthesize each side.
-- `col == None`: use `col.is_null()`.
-- Forgetting `.returning()`: the insert then returns only a command tag.
+- `col == None`: use `col.is_null()`. A `None` given to a `param` compared
+  with `==` raises: use `.where(col=None)`.
+- `update` and `delete` return a count (an `int`), not rows: add
+  `.returning()` when you need the rows. `insert` and `upsert` have no
+  `.returning()`; they always return rows.
+- Expecting `make` to drop a removed model's table: it only diffs the
+  models' tables; use `--all-tables`.
 - Building queries inside a hot loop or handler: build once at module level.
 - Editing an applied migration, or applying one with a review line left.
 - Formatting values into raw SQL: pass `$1` arguments.
@@ -153,8 +172,8 @@ from korbase import Database, cols, insert, param, select
 from korbase.migrate import create_all
 
 b = cols(Book)
-ADD_AUTHOR = insert(Author).values(name=param("n")).returning()
-ADD_BOOK = insert(Book).values(title=param("t"), author_id=param("a")).returning()
+ADD_AUTHOR = insert(Author).values(name=param("n"))
+ADD_BOOK = insert(Book).values(title=param("t"), author_id=param("a"))
 AUTHORS = select(Author).order_by(cols(Author).id.asc()).load(cols(Author).books)
 
 

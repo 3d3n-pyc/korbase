@@ -12,12 +12,16 @@ Korbase builds the SQL for you. You call `select`, `insert`, `update`,
 database until you pass the result to `db.run()` or `db.first()`.
 
 Most requests contain values that change: the age, the name typed by a user.
-A [parameter](glossary.md#parameter) is a named blank, such as
-`param("min")`, that you fill in when the query runs. Korbase sends the SQL
-text and the values to the database separately, and never pastes a value into
-the text. This is what stops [SQL injection](glossary.md#sql-injection): a
-name like `x'; DROP TABLE users; --` is only ever data, so the database never
-reads it as a command.
+You write them as plain Python values: `.where(name="Ada")`. Korbase sends
+the SQL text and the values to the database separately, and never pastes a
+value into the text. This is what stops
+[SQL injection](glossary.md#sql-injection): a name like
+`x'; DROP TABLE users; --` is only ever data, so the database never reads it
+as a command.
+
+The results are typed. `db.run(select(User))` is a `list[User]` for your
+editor and for pyright or mypy, so `user.name` autocompletes and a typo is
+flagged before you run anything.
 
 ## Run a query
 
@@ -30,7 +34,7 @@ import dataclasses
 import os
 from typing import Annotated, Optional
 
-from korbase import PK, Database, cols, delete, insert, param, select, table, update, upsert
+from korbase import PK, Database, cols, delete, insert, select, table, update, upsert
 
 
 @table("users")
@@ -44,7 +48,8 @@ class User:
 async def main() -> None:
     async with await Database.connect(os.environ["KORBASE_DSN"]) as db:
         U = cols(User)
-        print(await db.run(select(User).where(U.name == param("name")), name="Ada"))
+        users = await db.run(select(User).where(name="Ada"))
+        print(users)  # a list[User]
 
 
 asyncio.run(main())
@@ -52,9 +57,46 @@ asyncio.run(main())
 
 `cols(User)` gives you the [columns](glossary.md#column) of a model as
 attributes: `cols(User).name`. An unknown name raises `KorbaseError`.
-`db.run()` returns a list of models, `db.first()` the first one or `None`.
-A plain value in a condition, such as `"bob"` in `U.name == "bob"`, is also
-sent as a parameter.
+
+## What a query returns
+
+Your editor knows the type of the result from the builder you pass:
+
+```python
+users = await db.run(select(User))                      # list[User]
+user = await db.first(select(User).where(id=1))         # User | None
+changed = await db.run(update(User).set(age=37).where(id=1))   # int
+```
+
+| Builder | `db.run()` gives | `db.first()` gives |
+|---|---|---|
+| `select`, `insert`, `upsert` | `list[User]` | `User \| None` |
+| `update`, `delete` | `int`, the number of rows changed | not allowed |
+| `update` or `delete` with `.returning()` | `list[User]` | `User \| None` |
+
+`db.first()` returns `None` when no row matches, and the type says so: your
+editor reminds you to check. On an `update` or `delete` without
+`.returning()`, `db.first()` raises `KorbaseError`.
+
+## Filter with where()
+
+`where()` takes conditions, `column=value` pairs, or both. Everything you
+give it is joined with AND.
+
+```python
+await db.run(select(User).where(id=1))                           # id = 1
+await db.run(select(User).where(U.age > 18, U.name.like("A%")))  # both conditions
+await db.run(select(User).where(U.age > 18, name="Ada"))         # a condition and a keyword
+await db.run(select(User).where(age=None))                       # age IS NULL
+```
+
+- A keyword such as `name="Ada"` means "equals". With `None` it means
+  `IS NULL`. An unknown column name raises `KorbaseError`.
+- A condition is an expression built from a column: `U.age > 18`. A boolean
+  column is a condition by itself: `.where(P.published)`, with `P = cols(Post)`
+  for a `Post` model that has a `published` field.
+- `where()` can be called several times. The conditions are joined with AND.
+  `where()` with nothing in it raises `TypeError`.
 
 ## Operators
 
@@ -68,58 +110,68 @@ sent as a parameter.
 | `col.in_(values)` | `= ANY($n)`, with a list or a `param(...)` |
 | `a & b`, `a \| b`, `~a` | `AND`, `OR`, `NOT`, in parentheses |
 
-Combine conditions with `&`, `|` and `~`, each side in parentheses:
-`(U.age > 18) & (U.name == "bob")`. Never `and`, `or` or `not`.
+To say AND, put the conditions side by side in `where()`. You need `&`, `|`
+and `~` only for OR, NOT, or a mix: each side goes in parentheses.
+
+```python
+adults_or_named = select(User).where((U.age >= 18) | (U.name == "Ada"))
+```
+
+Never `and`, `or` or `not`: see [Going further](#why-and-and-or-raise).
 
 ## Select
 
 ```python
 q = (
     select(User)
-    .where(U.age > param("min"))
-    .where(U.name == "bob")
+    .where(U.age > 18, name="bob")
     .order_by(U.name.asc(), U.id.desc())
     .limit(10)
-    .offset(param("off"))
+    .offset(20)
 )
-rows = await db.run(q, min=18, off=0)
+rows = await db.run(q)
 ```
 
-- `where()` can be called several times. The conditions are joined with AND.
 - `order_by()` takes `col.asc()`, `col.desc()` or a plain column (ascending).
 - `limit()` and `offset()` take an `int` or a `param(...)`.
 
 ## Insert
 
 ```python
-q = insert(User).values(name=param("name"), age=param("age")).returning()
-user = await db.first(q, name="Ada", age=36)
+[user] = await db.run(insert(User).values(name="Ada", age=36))
 ```
 
 - `values()` lists the columns to write. A column left out gets its default.
-- `returning()` makes `db.run()` return a list of the written rows, and
-  `db.first()` return the first. Without it, `db.run()` returns the command tag.
+- An insert always returns the written row, with all its columns, so you
+  get the `id` the database chose. There is no `.returning()` on `insert`.
+  `db.run()` gives a list with one row, and `[user] =` takes it out of the
+  list. `db.first()` gives the row directly.
 
 ## Update and delete
 
 ```python
-q = update(User).set(name="Ada", age=param("age")).where(U.id == param("id"))
-await db.run(q, age=37, id=1)
-
-await db.run(delete(User).where(U.id == param("id")), id=1)
+changed = await db.run(update(User).set(name="Ada", age=37).where(id=1))
+removed = await db.run(delete(User).where(id=1))
 ```
 
 - `update` and `delete` need a `where()`, or the query raises `KorbaseError`.
   To change or remove every row on purpose, call `.all_rows()`.
-- Neither returns rows. `db.run()` returns the command tag.
+- `db.run()` returns the number of rows changed, as an `int`: `1` if the
+  row existed, `0` if no row matched.
+- To get the rows back instead, add `.returning()`. `db.run()` then returns a
+  list of models, `db.first()` the first:
+
+```python
+[old] = await db.run(delete(User).where(id=1).returning())
+```
 
 ## Upsert
 
-An upsert inserts a row, or updates the existing one on a conflict.
+An upsert inserts a row, or updates the existing one on a conflict. Like an
+insert, it always returns the written row.
 
 ```python
-q = upsert(User).values(id=param("id"), name=param("name"), age=1).on_conflict("id").returning()
-user = await db.first(q, id=1, name="Ada")
+[user] = await db.run(upsert(User).values(id=1, name="Ada", age=1).on_conflict("id"))
 ```
 
 - `on_conflict()` names the columns that must clash. It is required.
@@ -129,14 +181,32 @@ user = await db.first(q, id=1, name="Ada")
 
 ## Going further
 
-### Compiled once, with slots
+### Parameters: queries built once
 
-Builders are immutable: `where()` or `limit()` returns a new builder and
-leaves the old one as it was. The first time a builder is needed, it
-[compiles](glossary.md#compiled-query) to SQL text and a tuple of slots, and
-it keeps the result. Build your queries once, at module level, and pass them
-to `db.run()` as often as you like. A builder made inside a function is
+A plain value is part of the builder: `.where(name="Ada")` is a query about
+Ada, and nothing else. Builders are immutable: `where()` or `limit()`
+returns a new builder and leaves the old one as it was. The first time a
+builder is needed, it [compiles](glossary.md#compiled-query) to SQL text and
+a tuple of slots, and it keeps the result. A builder made inside a function is
 compiled again on every call.
+
+For a query that runs many times with different values, build it once at
+module level, with [parameters](glossary.md#parameter). A parameter is a
+named blank, such as `param("min")`, that you fill in when the query runs.
+Pass the values to `db.run()` by name:
+
+```python
+from korbase import param
+
+ADULTS = select(User).where(U.age > param("min")).order_by(U.name.asc()).limit(param("n"))
+
+rows = await db.run(ADULTS, min=18, n=10)
+rows = await db.run(ADULTS, min=21, n=50)
+```
+
+This compiles once and runs as often as you like, which is the fast way.
+`param()` works in `where()` conditions, `values()`, `set()`, `limit()` and
+`offset()`. A keyword takes one too: `.where(id=param("id"))`.
 
 Postgres takes positional arguments: `$1`, `$2`. `compile()` returns the SQL
 and one slot per `$n`, in order. A slot is a `param(...)` or a fixed value.
@@ -156,7 +226,7 @@ class User:
     age: Optional[int] = None
 
 
-ADULTS = select(User).where(cols(User).age >= param("min")).where(cols(User).name == "bob").limit(10)
+ADULTS = select(User).where(cols(User).age >= param("min"), name="bob").limit(10)
 
 c = ADULTS.compile()
 print(c.sql)
@@ -175,6 +245,8 @@ SELECT "users"."id", "users"."name", "users"."age" FROM "users" WHERE ("users"."
 
 ### The SQL behind each builder
 
+A plain value and a `param(...)` give the same SQL: each one is a `$n`.
+
 ```sql
 SELECT "users"."id", "users"."name", "users"."age" FROM "users" WHERE ("users"."age" > $1 AND "users"."name" = $2) ORDER BY "users"."name" ASC, "users"."id" DESC LIMIT $3 OFFSET $4
 INSERT INTO "users" ("name", "age") VALUES ($1, $2) RETURNING "id", "name", "age"
@@ -183,18 +255,25 @@ DELETE FROM "users" WHERE "users"."id" = $1
 INSERT INTO "users" ("id", "name", "age") VALUES ($1, $2, $3) ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name", "age" = EXCLUDED."age" RETURNING "id", "name", "age"
 ```
 
-### NULL: `== None` and `is_null()`
+### NULL: `None`, `== None` and `is_null()`
 
-Only a literal `None` becomes `IS NULL`. `col == param("x")` always compiles
-to `=`, and in SQL `= NULL` never matches anything, even when you pass
-`None`. For a nullable column and a value that may be `None`, write
-`col.is_null()`, which says what it means.
+In SQL, `= NULL` never matches anything. So Korbase handles `None` for you
+where it can, and refuses where it cannot:
+
+- A literal `None` becomes `IS NULL`: `.where(age=None)`, `U.age == None` and
+  `U.age.is_null()` mean the same. A variable that may be `None` works too:
+  `.where(age=maybe_age)`, because the choice is made when you build the query.
+- A `param(...)` always compiles to `=`, and its value is only known later. If
+  you run the query with `None` for a parameter compared by `==`, `!=` or
+  `in_()`, `db.run()` raises `KorbaseError` instead of silently matching no
+  row. For a value that may be `None`, use a plain value or `.is_null()`.
 
 ### Why `and` and `or` raise
 
 Python decides `a and b` by turning `a` into `True` or `False`. A Korbase
 condition is a piece of SQL, not a boolean, so it cannot answer. It raises
 `TypeError` instead of silently dropping half of your condition. Use `&`, `|`
-and `~`. This also stops `1 < U.age < 5`, which Python reads as an `and`.
+and `~`, or several conditions in `where()`. This also stops `1 < U.age < 5`,
+which Python reads as an `and`.
 
 **Next:** [Relations](relations.md)
