@@ -76,4 +76,4 @@ Each request that uses `kdb.transaction` holds a connection until it ends. If `m
 - **Rollback on any error.** `kdb.transaction` is a generator dependency that wraps `db.transaction()`. Korvex throws the handler's exception into it, so the block rolls back and the error goes on as usual. This is not limited to `HTTPException`: the tests cover that case, and a handler that raises `RuntimeError` also had its insert rolled back when we tried it.
 - **`from __future__ import annotations` and a module-level `kdb`.** With postponed annotations, `Annotated[Database, Depends(kdb.database)]` is a string until Korvex reads it. Korvex then looks the names up in the module's globals, so `kdb`, `Database` and `Transaction` must be module-level names. If `kdb` is created inside a function, the lookup cannot find it.
 
-**Next:** [Testing](testing.md)
+**Next:** [SQLite](sqlite.md)

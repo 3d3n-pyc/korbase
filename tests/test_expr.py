@@ -110,3 +110,13 @@ def test_hashable_and_cached() -> None:
 def test_order() -> None:
     assert sql(U.id.asc())[0] == '"users"."id" ASC'
     assert sql(U.name.desc())[0] == '"users"."name" DESC'
+
+
+def test_sqlite_placeholders_and_ops() -> None:
+    from korbase._dialect import SQLITE
+
+    ctx = ParamCollector(SQLITE)
+    text = compile_expr((U.id == param("a")) & U.name.ilike("x") & U.id.in_(param("a")), ctx)
+    assert (
+        text == '(("users"."id" = ?1 AND "users"."name" LIKE ?2) AND "users"."id" IN (SELECT value FROM json_each(?1)))'
+    )

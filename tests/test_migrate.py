@@ -246,3 +246,63 @@ def test_dev_stops_on_review(dsn: str, tmp_path: Path) -> None:
         assert [s for _, s in await status(db, d)] == ["applied", "pending"]
 
     _run(dsn, body)
+
+
+def _sqlite_run(tmp_path: Path, body: Callable[[Database], Awaitable[Any]]) -> Any:
+    """Run `body` on a fresh SQLite file."""
+
+    async def main_() -> Any:
+        """Connect and run."""
+        async with await Database.connect(f"sqlite:///{tmp_path / 'mg.db'}") as db:
+            return await body(db)
+
+    return asyncio.run(main_())
+
+
+def test_sqlite_end_to_end(tmp_path: Path) -> None:
+    """make, apply, status, no changes, then an added nullable column."""
+    d = tmp_path / "mig"
+
+    async def body(db: Database) -> None:
+        """Walk through the workflow."""
+        first = await make(db, _models(tmp_path, "ms_v1", V1), d, "init")
+        assert first is not None and first.name == "0001_init.sql"
+        assert await apply(db, d) == [first.name]
+        assert await status(db, d) == [(first.name, "applied")]
+        assert await make(db, _models(tmp_path, "ms_v1", V1), d, "again") is None
+        second = await make(db, _models(tmp_path, "ms_v2", V2), d, "more")
+        assert second is not None and "ADD COLUMN" in second.read_text()
+        assert await apply(db, d) == [second.name]
+        assert await make(db, _models(tmp_path, "ms_v2", V2), d, "again") is None
+
+    _sqlite_run(tmp_path, body)
+
+
+def test_sqlite_type_change_needs_review(tmp_path: Path) -> None:
+    """A type change is flagged for review and apply refuses until it is removed."""
+    d = tmp_path / "mig"
+    changed = V1.replace("name: str", "name: int")
+
+    async def body(db: Database) -> None:
+        """Create, then change a type."""
+        await make(db, _models(tmp_path, "ms_t1", V1), d, "init")
+        await apply(db, d)
+        f = await make(db, _models(tmp_path, "ms_t2", changed), d, "retype")
+        assert f is not None and "-- korbase:review" in f.read_text()
+        with pytest.raises(KorbaseError):
+            await apply(db, d)
+        f.write_text(f.read_text().replace("-- korbase:review", "-- reviewed"))
+        assert await apply(db, d) == [f.name]
+
+    _sqlite_run(tmp_path, body)
+
+
+def test_sqlite_cli(tmp_path: Path) -> None:
+    """make, apply and status work from the shell on a sqlite DSN."""
+    (tmp_path / "ms_cli.py").write_text(V1)
+    dsn = f"sqlite:///{tmp_path / 'cli.db'}"
+    r = _cli(dsn, tmp_path, "make", "--models", "ms_cli", "--dir", "mig", "-m", "init")
+    assert r.returncode == 0, r.stderr
+    assert _cli(dsn, tmp_path, "apply", "--dir", "mig").returncode == 0
+    assert _cli(dsn, tmp_path, "status", "--dir", "mig").stdout.strip() == "applied 0001_init.sql"
+    assert _cli(dsn, tmp_path, "make", "--models", "ms_cli", "--dir", "mig").stdout.strip() == "no changes"

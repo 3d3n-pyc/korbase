@@ -24,9 +24,11 @@ from typing import Optional
 
 from korbase import _ddl
 from korbase._db import Database
+from korbase._dialect import SQLITE
 from korbase._diff import diff, render
 from korbase._ident import KorbaseError, quote_ident
 from korbase._inspect import inspect
+from korbase._inspect_sqlite import inspect_sqlite
 from korbase._runner import apply, status
 from korbase._schema import Snapshot
 
@@ -42,8 +44,12 @@ class _Rollback(Exception):
 
 async def create_all(db: Database, models: Iterable[type]) -> None:
     """Create the tables of `models` in one transaction; handy in tests."""
-    async with db._conn() as conn, conn.transaction():
-        await _ddl.create_all(conn, models)
+    async with db._conn() as conn:
+        if db._dialect.name == "sqlite":
+            await _ddl.create_all(conn, models, dialect=db._dialect)
+            return
+        async with conn.transaction():
+            await _ddl.create_all(conn, models)
 
 
 def _slug(message: str) -> str:
@@ -73,8 +79,23 @@ def _only_tables_of(current: Snapshot, desired: Snapshot) -> Snapshot:
     return Snapshot({n: t for n, t in current.tables.items() if n in desired.tables})
 
 
+async def _changes_sqlite(db: Database, models: Iterable[type], all_tables: bool) -> str:
+    """Return the SQL moving a SQLite database to the models, built in a memory database."""
+    scratch = await Database.connect("sqlite::memory:")
+    async with scratch, scratch._conn() as sconn:
+        await _ddl.create_all(sconn, models, dialect=SQLITE)
+        desired = await inspect_sqlite(sconn)
+    async with db._conn() as conn:
+        current = await inspect_sqlite(conn)
+    if not all_tables:
+        current = _only_tables_of(current, desired)
+    return render(diff(current, desired, SQLITE), SQLITE)
+
+
 async def _changes(db: Database, models: Iterable[type], all_tables: bool = False) -> str:
     """Return the SQL moving `public` to the models, using a scratch schema that is rolled back."""
+    if db._dialect.name == "sqlite":
+        return await _changes_sqlite(db, models, all_tables)
     scratch = f"korbase_scratch_{os.getpid()}_{secrets.token_hex(4)}"
     sql = ""
     with contextlib.suppress(_Rollback):

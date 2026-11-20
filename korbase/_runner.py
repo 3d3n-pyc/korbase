@@ -10,6 +10,7 @@ from pathlib import Path
 
 from korbase._backend import Conn
 from korbase._db import Database
+from korbase._dialect import PG, SQLITE, Dialect
 from korbase._ident import KorbaseError
 
 __all__ = ["apply", "status"]
@@ -23,6 +24,12 @@ _TABLE = (
     "name text PRIMARY KEY, checksum text NOT NULL, "
     "applied_at timestamptz NOT NULL DEFAULT now())"
 )
+_TABLE_SQLITE = (
+    "CREATE TABLE IF NOT EXISTS korbase_migrations ("
+    "name TEXT PRIMARY KEY, checksum TEXT NOT NULL, "
+    "applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+)
+_EXISTS_SQLITE = "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'korbase_migrations'"
 
 
 @dataclass(frozen=True)
@@ -100,62 +107,122 @@ def _check(files: list[_File], states: list[tuple[str, str]], applied: dict[str,
     return pending
 
 
-async def _record(conn: Conn, f: _File) -> None:
+async def _record(conn: Conn, f: _File, dialect: Dialect) -> None:
     """Insert the version row of `f`."""
-    await conn.execute("INSERT INTO korbase_migrations (name, checksum) VALUES ($1, $2)", [f.name, f.checksum])
+    marks = f"{dialect.placeholder(1)}, {dialect.placeholder(2)}"
+    await conn.execute(f"INSERT INTO korbase_migrations (name, checksum) VALUES ({marks})", [f.name, f.checksum])
 
 
-async def _run_file(conn: Conn, f: _File) -> None:
-    """Run one file, in a transaction unless it opts out."""
+async def _body(conn: Conn, f: _File, dialect: Dialect) -> bool:
+    """Run the script of `f` and record it; on SQLite skip a file another apply recorded first."""
+    if dialect.name == "sqlite":
+        mark = dialect.placeholder(1)
+        if await conn.fetch(f"SELECT 1 FROM korbase_migrations WHERE name = {mark}", [f.name], tuple):
+            return False
+    await conn.execute_script(f.text)
+    await _record(conn, f, dialect)
+    return True
+
+
+async def _claim(conn: Conn, f: _File) -> bool:
+    """Insert the version row of `f` in a short write transaction; False if another apply holds it."""
+    async with conn.transaction():
+        mark = SQLITE.placeholder(1)
+        if await conn.fetch(f"SELECT 1 FROM korbase_migrations WHERE name = {mark}", [f.name], tuple):
+            return False
+        await _record(conn, f, SQLITE)
+    return True
+
+
+async def _run_claimed(conn: Conn, f: _File) -> bool:
+    """Run a no-transaction file on SQLite after claiming it; release the claim if it fails."""
+    if not await _claim(conn, f):
+        return False
     try:
+        await conn.execute_script(f.text)
+    except BaseException:
+        async with conn.transaction():
+            mark = SQLITE.placeholder(1)
+            await conn.execute(f"DELETE FROM korbase_migrations WHERE name = {mark}", [f.name])
+        raise
+    return True
+
+
+async def _run_file(conn: Conn, f: _File, dialect: Dialect) -> bool:
+    """Run one file, in a transaction unless it opts out; False when it was already applied."""
+    try:
+        if f.text.startswith(_NO_TX) and dialect.name == "sqlite":
+            return await _run_claimed(conn, f)
         if f.text.startswith(_NO_TX):
-            await conn.execute_script(f.text)
-            await _record(conn, f)
-        else:
-            async with conn.transaction():
-                await conn.execute_script(f.text)
-                await _record(conn, f)
+            return await _body(conn, f, dialect)
+        async with conn.transaction():
+            return await _body(conn, f, dialect)
     except KorbaseError:
         raise
     except Exception as exc:
         raise KorbaseError(f"migration {f.name} failed: {exc}") from exc
 
 
+async def _apply_pg(conn: Conn, files: list[_File]) -> list[str]:
+    """Apply the pending files on Postgres under an advisory lock."""
+    done: list[str] = []
+    await conn.execute("SELECT pg_advisory_lock($1)", [_LOCK_KEY])
+    before = None
+    try:
+        before = (await conn.fetch("SELECT current_setting('standard_conforming_strings')", [], tuple))[0][0]
+        await conn.execute("SELECT set_config('standard_conforming_strings', 'on', false)", [])
+        await conn.execute_script(_TABLE)
+        applied = await _applied(conn)
+        for f in _check(files, _classify(files, applied), applied):
+            await _run_file(conn, f, PG)
+            done.append(f.name)
+    finally:
+        if before is not None:
+            await conn.execute("SELECT set_config('standard_conforming_strings', $1, false)", [before])
+        await conn.execute("SELECT pg_advisory_unlock($1)", [_LOCK_KEY])
+    return done
+
+
+async def _apply_sqlite(conn: Conn, files: list[_File]) -> list[str]:
+    """Apply the pending files on SQLite; each file's `BEGIN IMMEDIATE` is the lock."""
+    await conn.execute_script(_TABLE_SQLITE)
+    applied = await _applied(conn)
+    pending = _check(files, _classify(files, applied), applied)
+    return [f.name for f in pending if await _run_file(conn, f, SQLITE)]
+
+
 async def apply(db: Database, directory: str | os.PathLike[str]) -> list[str]:
     """Apply the pending migration files in `directory` and return their names.
 
-    Runs on one connection under an advisory lock, so concurrent callers
-    apply each file once. Refuses, applying nothing, when an applied file is
-    missing or changed, when a pending file sorts before the last applied one,
-    or when a pending file contains `-- korbase:review`. A file whose first
-    line is `-- korbase:no-transaction` runs outside a transaction. It stops at
-    the first failing file; earlier files stay applied.
+    Runs on one connection, so concurrent callers apply each file once: on
+    Postgres under an advisory lock, on SQLite because each file runs in a
+    write transaction that first checks the version table. Refuses, applying
+    nothing, when an applied file is missing or changed, when a pending file
+    sorts before the last applied one, or when a pending file contains
+    `-- korbase:review`. A file whose first line is `-- korbase:no-transaction`
+    runs outside a transaction. It stops at the first failing file; earlier
+    files stay applied.
+
+    On SQLite a no-transaction file is claimed first: its version row is
+    inserted in a short write transaction, then the file runs. If it fails,
+    the row is deleted. If the process crashes in between, the row stays and
+    the file counts as applied; check what the file did, then delete its row
+    from `korbase_migrations` to run it again.
     """
     files = _read_files(directory)
-    done: list[str] = []
     async with db._conn() as conn:
-        await conn.execute("SELECT pg_advisory_lock($1)", [_LOCK_KEY])
-        before = None
-        try:
-            before = (await conn.fetch("SELECT current_setting('standard_conforming_strings')", [], tuple))[0][0]
-            await conn.execute("SELECT set_config('standard_conforming_strings', 'on', false)", [])
-            await conn.execute_script(_TABLE)
-            applied = await _applied(conn)
-            pending = _check(files, _classify(files, applied), applied)
-            for f in pending:
-                await _run_file(conn, f)
-                done.append(f.name)
-        finally:
-            if before is not None:
-                await conn.execute("SELECT set_config('standard_conforming_strings', $1, false)", [before])
-            await conn.execute("SELECT pg_advisory_unlock($1)", [_LOCK_KEY])
-    return done
+        if db._dialect.name == "sqlite":
+            return await _apply_sqlite(conn, files)
+        return await _apply_pg(conn, files)
 
 
 async def status(db: Database, directory: str | os.PathLike[str]) -> list[tuple[str, str]]:
     """Return (name, state) per migration: applied, pending, changed or missing."""
     files = _read_files(directory)
     async with db._conn() as conn:
-        found = await conn.fetch("SELECT to_regclass('korbase_migrations') IS NOT NULL", [], tuple)
-        applied = await _applied(conn) if found[0][0] else {}
+        if db._dialect.name == "sqlite":
+            found = await conn.fetch(_EXISTS_SQLITE, [], tuple)
+        else:
+            found = await conn.fetch("SELECT to_regclass('korbase_migrations') IS NOT NULL", [], tuple)
+        applied = await _applied(conn) if found and found[0][0] else {}
     return _classify(files, applied)

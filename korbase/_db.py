@@ -7,7 +7,8 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, Optional, TypeVar, Union, overload
 
 from korbase._backend import Backend, Conn, Pool
-from korbase._build import named_builder, positional_builder, validating_builder
+from korbase._build import decoding_rows, named_builder, positional_builder, validating_builder
+from korbase._dialect import PG, Dialect
 from korbase._expr import Param
 from korbase._ident import KorbaseError
 from korbase._query import (
@@ -54,11 +55,11 @@ def _reject_null_eq(compiled: Compiled, params: dict[str, Any]) -> None:
             )
 
 
-def _row_builder(query: _Query[Any], validate: bool) -> Any:
+def _row_builder(query: _Query[Any], validate: bool, dialect: Dialect) -> Any:
     """Return the row builder for the columns of the query's model."""
     if validate:
-        return validating_builder(query._meta)
-    return positional_builder(query._meta)
+        return validating_builder(query._meta, dialect)
+    return positional_builder(query._meta, dialect)
 
 
 def _count(tag: str) -> int:
@@ -66,24 +67,41 @@ def _count(tag: str) -> int:
     return int(tag.rsplit(" ", 1)[-1])
 
 
-def _by_name(model: type, names: Sequence[str], validate: bool) -> Any:
+def _by_name(model: type, names: Sequence[str], validate: bool, dialect: Dialect) -> Any:
     """Return a builder that maps a row with column `names` to `model`."""
     if not validate:
-        return named_builder(model, tuple(names))
+        return named_builder(model, tuple(names), dialect)
     import msgspec
+
+    decode = None if dialect is PG else decoding_rows(model, names, dialect)
 
     def build(row: Sequence[Any]) -> Any:
         """Validate one row and build the model."""
-        data = dict(zip(names, row, strict=True))
+        data = dict(zip(names, row if decode is None else decode(row), strict=True))
         return msgspec.convert(data, model, from_attributes=True)
 
     return build
+
+
+def _backend_for(dsn: str) -> Backend:
+    """Return the backend for the scheme of `dsn`; the DSN is never shown in errors."""
+    scheme = dsn.split(":", 1)[0].lower() if ":" in dsn else ""
+    if scheme in ("postgresql", "postgres"):
+        from korbase._asyncpg import AsyncpgBackend
+
+        return AsyncpgBackend()
+    if scheme == "sqlite":
+        from korbase._sqlite import SqliteBackend
+
+        return SqliteBackend()
+    raise KorbaseError("unknown database scheme: use postgresql://, postgres:// or sqlite:")
 
 
 class _Runner:
     """Shared query methods; subclasses say how to get a connection."""
 
     _validate = False
+    _dialect: Dialect = PG
 
     def _conn(self) -> AbstractAsyncContextManager[Conn]:
         """Return a context manager that yields a connection."""
@@ -102,29 +120,33 @@ class _Runner:
         returns a list of models. Any other update or delete returns the
         number of rows it changed.
         """
-        compiled = query.compile()
+        compiled = query.compile(self._dialect)
         args = _args(compiled, params)
         async with self._conn() as conn:
             if not query.returns_rows:
                 return _count(await conn.execute(compiled.sql, args))
-            rows = await conn.fetch(compiled.sql, args, _row_builder(query, self._validate))
+            rows = await conn.fetch(compiled.sql, args, _row_builder(query, self._validate, self._dialect))
             if isinstance(query, Select):
-                await load_relations(conn, rows, query._loads, self._validate)
+                await self._load(conn, rows, query)
             return rows
+
+    async def _load(self, conn: Conn, rows: list[Any], query: Any) -> None:
+        """Load the relations of `query` into `rows`, decoding children by dialect."""
+        await load_relations(conn, rows, query._loads, self._validate, self._dialect)
 
     async def first(self, query: Rows[M], /, **params: Any) -> Optional[M]:
         """Run a query that returns rows and return the first model, or `None`.
 
         Other updates and deletes raise `KorbaseError`: add `.returning()`.
         """
-        compiled = query.compile()
+        compiled = query.compile(self._dialect)
         args = _args(compiled, params)
         if not query.returns_rows:
             raise KorbaseError("first() needs a query that returns rows: add .returning()")
         async with self._conn() as conn:
-            row = await conn.fetchrow(compiled.sql, args, _row_builder(query, self._validate))
+            row = await conn.fetchrow(compiled.sql, args, _row_builder(query, self._validate, self._dialect))
             if row is not None and isinstance(query, Select):
-                await load_relations(conn, [row], query._loads, self._validate)
+                await self._load(conn, [row], query)
             return row
 
     @overload
@@ -139,7 +161,7 @@ class _Runner:
             if model is None:
                 return await conn.fetch(sql, args, tuple)
             names, rows = await conn.fetch_columns(sql, args)
-        build = _by_name(model, names, self._validate)
+        build = _by_name(model, names, self._validate, self._dialect)
         return [build(r) for r in rows]
 
     @overload
@@ -154,7 +176,7 @@ class _Runner:
             if model is None:
                 return await conn.fetchrow(sql, args, tuple)
             names, rows = await conn.fetch_columns(sql, args)
-        build = _by_name(model, names, self._validate)
+        build = _by_name(model, names, self._validate, self._dialect)
         return build(rows[0]) if rows else None
 
     async def execute(self, sql: str, *args: Any) -> str:
@@ -166,10 +188,11 @@ class _Runner:
 class Transaction(_Runner):
     """Queries bound to one connection inside a transaction."""
 
-    def __init__(self, conn: Conn, validate: bool) -> None:
+    def __init__(self, conn: Conn, validate: bool, dialect: Dialect = PG) -> None:
         """Bind to `conn`; use `Database.transaction()` instead."""
         self._bound = conn
         self._validate = validate
+        self._dialect = dialect
 
     @asynccontextmanager
     async def _conn(self) -> AsyncIterator[Conn]:
@@ -180,27 +203,31 @@ class Transaction(_Runner):
     async def transaction(self) -> AsyncIterator[Transaction]:
         """Open a nested transaction, which is a savepoint."""
         async with self._bound.transaction():
-            yield Transaction(self._bound, self._validate)
+            yield Transaction(self._bound, self._validate, self._dialect)
 
 
 class Database(_Runner):
     """A pool of connections plus the methods to run queries."""
 
-    def __init__(self, pool: Pool, validate: bool = False) -> None:
+    def __init__(self, pool: Pool, validate: bool = False, dialect: Dialect = PG) -> None:
         """Wrap `pool`; use `Database.connect()` instead."""
         self._pool = pool
         self._validate = validate
+        self._dialect = dialect
 
     @classmethod
     async def connect(
         cls, dsn: str, *, backend: Optional[Backend] = None, validate: bool = False, **opts: Any
     ) -> Database:
-        """Open a pool on `dsn`. `validate=True` checks every row against its model."""
-        if backend is None:
-            from korbase._asyncpg import AsyncpgBackend
+        """Open a pool on `dsn`. `validate=True` checks every row against its model.
 
-            backend = AsyncpgBackend()
-        return cls(await backend.connect(dsn, **opts), validate)
+        Without `backend`, the DSN scheme picks it: `postgresql://` or
+        `postgres://` for Postgres, `sqlite:` for SQLite.
+        """
+        if backend is None:
+            backend = _backend_for(dsn)
+        dialect = getattr(backend, "dialect", PG)
+        return cls(await backend.connect(dsn, **opts), validate, dialect)
 
     def _conn(self) -> AbstractAsyncContextManager[Conn]:
         """Borrow a pooled connection."""
@@ -210,7 +237,7 @@ class Database(_Runner):
     async def transaction(self) -> AsyncIterator[Transaction]:
         """Open a transaction on one connection: commit on success, roll back on error."""
         async with self._pool.acquire() as conn, conn.transaction():
-            yield Transaction(conn, self._validate)
+            yield Transaction(conn, self._validate, self._dialect)
 
     async def close(self) -> None:
         """Close the pool."""

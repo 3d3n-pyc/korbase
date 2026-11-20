@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 import pytest
 
+from korbase._dialect import PG, SQLITE
 from korbase._expr import Param, Value, cols, param
 from korbase._ident import KorbaseError
 from korbase._meta import PK, Default, table
@@ -244,3 +245,38 @@ def test_builder_types() -> None:
         assert_type(update(User).returning(), UpdateReturning[User])
         assert_type(delete(User).where(id=1), Delete[User])
         assert_type(delete(User).returning(), DeleteReturning[User])
+
+
+def test_sqlite_select_where_in_ilike() -> None:
+    q = select(User).where(U.name.ilike("a%") & U.id.in_([1, 2]) & (U.age > param("x")))
+    sql = q.compile(SQLITE).sql
+    assert '"users"."name" LIKE ?1' in sql
+    assert '"users"."id" IN (SELECT value FROM json_each(?2))' in sql
+    assert '"users"."age" > ?3' in sql
+    assert "$" not in sql
+    assert "ILIKE" in q.compile().sql and "$1" in q.compile().sql
+
+
+def test_sqlite_param_reuse() -> None:
+    c = select(User).where((U.age > param("x")) | (U.id < param("x"))).compile(SQLITE)
+    assert c.sql.endswith('"users"."age" > ?1 OR "users"."id" < ?1)') or "?2" not in c.sql
+    assert len(c.slots) == 1
+
+
+def test_sqlite_writes() -> None:
+    assert insert(User).values(name=param("n")).compile(SQLITE).sql == insert(User).values(
+        name=param("n")
+    ).compile().sql.replace("$", "?")
+    assert update(User).set(age=1).all_rows().compile(SQLITE).sql == 'UPDATE "users" SET "age" = ?1'
+    assert delete(User).where(U.id == param("i")).compile(SQLITE).sql == 'DELETE FROM "users" WHERE "users"."id" = ?1'
+    up = upsert(User).on_conflict("id").compile(SQLITE).sql
+    assert "ON CONFLICT" in up and "EXCLUDED" in up.upper() and "$" not in up
+
+
+def test_compile_memoised_per_dialect() -> None:
+    q = select(User)
+    pg, lite = q.compile(), q.compile(SQLITE)
+    assert q.compile() is pg and q.compile(PG) is pg
+    assert q.compile(SQLITE) is lite and lite is not pg
+    assert lite.sql != pg.sql or "$" not in pg.sql
+    assert q.where(U.id == 1).compile(SQLITE) is not lite

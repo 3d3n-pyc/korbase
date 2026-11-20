@@ -238,3 +238,75 @@ def test_render_sets_standard_conforming_strings() -> None:
     """Generated files start with the SET."""
     out = render(diff(snap(), snap(BASE)))
     assert out.startswith(SET)
+
+
+from korbase._dialect import SQLITE as LITE  # noqa: E402
+
+
+def lite(current: Snapshot, desired: Snapshot) -> str:
+    """Return the rendered SQLite diff."""
+    return render(diff(current, desired, LITE), LITE)
+
+
+def test_sqlite_create_table_inline_fk_no_set():
+    parent = tbl("p", (col("id", "INTEGER", False, identity=True),))
+    child = tbl(
+        "c",
+        (col("id", "INTEGER", False, identity=True), col("p_id", "INTEGER")),
+        foreign_keys=(ForeignKey("c_p_id_fkey", ("p_id",), "p", ("id",), "cascade"),),
+        indexes=(Index("c_ix", ("p_id",), False),),
+    )
+    out = lite(snap(), snap(parent, child))
+    assert "SET " not in out
+    assert '"id" INTEGER PRIMARY KEY' in out
+    assert "GENERATED" not in out and "ALTER TABLE" not in out
+    assert 'CONSTRAINT "c_p_id_fkey" FOREIGN KEY ("p_id") REFERENCES "p" ("id") ON DELETE CASCADE' in out
+    assert 'CREATE INDEX "c_ix" ON "c" ("p_id");' in out
+
+
+def test_sqlite_drop_table():
+    out = lite(snap(BASE), snap())
+    assert out.startswith("-- korbase:review drops table a")
+    assert out.endswith('DROP TABLE "a";\n')
+
+
+def test_sqlite_add_column_rules():
+    ok = tbl("a", (ID, col("x"), col("y", "TEXT", False, "'z'")))
+    out = lite(snap(tbl("a", (ID, col("x")))), snap(ok))
+    assert out == 'ALTER TABLE "a" ADD COLUMN "y" TEXT NOT NULL DEFAULT \'z\';\n'
+    bad = tbl("a", (ID, col("x"), col("y", "TEXT", False)))
+    out = lite(snap(BASE), snap(bad))
+    assert out.startswith("-- korbase:review SQLite cannot add this column in place; rebuild the table\n")
+    assert 'ADD COLUMN "y" TEXT NOT NULL;' in out
+    fk = ForeignKey("a_y_fkey", ("y",), "a", ("id",), "cascade")
+    keyed = tbl("a", (ID, col("x"), col("y", "bigint")), foreign_keys=(fk,))
+    assert "cannot add this column in place" in lite(snap(BASE), snap(keyed))
+
+
+def test_sqlite_drop_column_and_index():
+    out = lite(snap(tbl("a", (ID, col("x")), indexes=(Index("i", ("x",), False),))), snap(tbl("a", (ID,))))
+    assert 'DROP INDEX "i";' in out
+    assert "-- korbase:review drops column a.x" in out
+    assert 'ALTER TABLE "a" DROP COLUMN "x";' in out
+
+
+def test_sqlite_alter_is_comment_only():
+    new = tbl("a", (ID, col("x", "INTEGER", False, "0")))
+    out = lite(snap(BASE), snap(new))
+    assert 'SQLite cannot alter the type of x on "a"; rebuild the table (see docs/sqlite.md)' in out
+    assert 'the nullability of x on "a"' in out and 'the default of x on "a"' in out
+    assert all(line.startswith("--") for line in out.splitlines())
+
+
+def test_sqlite_type_case_insensitive():
+    assert lite(snap(tbl("a", (ID, col("x", "text")))), snap(tbl("a", (ID, col("x", "TEXT"))))) == ""
+
+
+def test_sqlite_constraints_by_columns():
+    cur = tbl("a", (ID, col("x")), uniques=(("a_x_key", ("x",)),))
+    des = tbl("a", (ID, col("x")), uniques=(("renamed", ("x",)),))
+    assert lite(snap(cur), snap(des)) == ""
+    out = lite(snap(cur), snap(tbl("a", (ID, col("x")), pk=("x",))))
+    assert 'SQLite cannot alter the primary key on "a"' in out
+    out = lite(snap(BASE), snap(des))
+    assert 'SQLite cannot alter a unique constraint on "a"' in out and "add unique" in out
