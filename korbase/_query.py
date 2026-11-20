@@ -6,6 +6,7 @@ import copy
 from dataclasses import dataclass
 from typing import Any, Generic, Optional, TypeVar, Union
 
+from korbase._dialect import PG, Dialect
 from korbase._expr import (
     Column,
     Expr,
@@ -44,7 +45,7 @@ Slot = Union[Param, Value]
 
 @dataclass(frozen=True)
 class Compiled:
-    """SQL text plus the slots that fill its `$n` placeholders, in order."""
+    """SQL text plus the slots that fill its numbered placeholders (`$n` or `?n`), in order."""
 
     sql: str
     slots: tuple[Slot, ...]
@@ -64,6 +65,7 @@ class _Query(Generic[M]):
         self.model = model
         self._meta: TableMeta = table_meta(model)
         self._compiled: Optional[Compiled] = None
+        self._compiled_alt: Optional[tuple[Dialect, Compiled]] = None
 
     def _replace(self: _Q, **changes: Any) -> _Q:
         """Return a copy with `changes` applied and no memoised result."""
@@ -71,6 +73,7 @@ class _Query(Generic[M]):
         for key, value in changes.items():
             setattr(new, key, value)
         new._compiled = None
+        new._compiled_alt = None
         return new
 
     def _become(self, cls: Any) -> Any:
@@ -78,19 +81,29 @@ class _Query(Generic[M]):
         new = cls.__new__(cls)
         new.__dict__.update(self.__dict__)
         new._compiled = None
+        new._compiled_alt = None
         return new
 
     def _build(self, ctx: ParamCollector) -> str:
         """Return the SQL text, adding parameters to `ctx`."""
         raise NotImplementedError
 
-    def compile(self) -> Compiled:
-        """Return the SQL and slots; computed once, then reused."""
-        if self._compiled is None:
-            ctx = ParamCollector()
-            sql = self._build(ctx)
-            self._compiled = Compiled(sql, tuple(ctx.items))
-        return self._compiled
+    def compile(self, dialect: Dialect = PG) -> Compiled:
+        """Return the SQL and slots for `dialect`; computed once per dialect, then reused."""
+        if dialect is PG:
+            if self._compiled is None:
+                self._compiled = self._compile_for(PG)
+            return self._compiled
+        alt = self._compiled_alt
+        if alt is None or alt[0] is not dialect:
+            alt = self._compiled_alt = (dialect, self._compile_for(dialect))
+        return alt[1]
+
+    def _compile_for(self, dialect: Dialect) -> Compiled:
+        """Build the `Compiled` of this query for `dialect`."""
+        ctx = ParamCollector(dialect)
+        sql = self._build(ctx)
+        return Compiled(sql, tuple(ctx.items))
 
     def _table(self) -> str:
         """Return the quoted table name."""

@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Generic, NoReturn, TypeVar, Union
 
+from korbase._dialect import PG, Dialect
 from korbase._ident import KorbaseError, quote_ident, validate_ident
 from korbase._meta import RelMeta, TableMeta, table_meta
 
@@ -63,10 +64,11 @@ def param(name: str) -> Param:
 
 
 class ParamCollector:
-    """Collects parameters in order and hands out `$n` placeholders."""
+    """Collects parameters in order and hands out numbered placeholders."""
 
-    def __init__(self) -> None:
-        """Start with no parameters."""
+    def __init__(self, dialect: Dialect = PG) -> None:
+        """Start with no parameters; placeholders follow `dialect`."""
+        self.dialect = dialect
         self.items: list[Union[Param, Value]] = []
         self._named: dict[str, int] = {}
 
@@ -82,12 +84,12 @@ class ParamCollector:
             if known is not None:
                 if eq and not self.items[known - 1].eq:  # type: ignore[union-attr]
                     self.items[known - 1] = Param(item.name, True)
-                return f"${known}"
+                return self.dialect.placeholder(known)
             self.items.append(Param(item.name, True) if eq else item)
             self._named[item.name] = len(self.items)
         else:
             self.items.append(item)
-        return f"${len(self.items)}"
+        return self.dialect.placeholder(len(self.items))
 
 
 def _operand(value: Any) -> Any:
@@ -238,7 +240,10 @@ class BinOp(Expr):
     def compile(self, ctx: ParamCollector) -> str:
         """Return `left op right`, right side as a placeholder."""
         eq = self.op in ("=", "<>")
-        return f"{_sql(self.left, ctx, eq)} {self.op} {_sql(self.right, ctx, eq)}"
+        op = self.op
+        if op in ("LIKE", "ILIKE"):
+            op = ctx.dialect.like_op(op == "ILIKE")
+        return f"{_sql(self.left, ctx, eq)} {op} {_sql(self.right, ctx, eq)}"
 
 
 class IsNull(Expr):
@@ -267,8 +272,8 @@ class InAny(Expr):
         self.values = values if isinstance(values, Param) else Value(list(values))
 
     def compile(self, ctx: ParamCollector) -> str:
-        """Return `col = ANY($n)`."""
-        return f"{self.column.compile(ctx)} = ANY({ctx.add(self.values, True)})"
+        """Return `col = ANY($n)` (Postgres) or the `json_each` form (SQLite)."""
+        return ctx.dialect.any_of(self.column.compile(ctx), ctx.add(self.values, True))
 
 
 class And(Expr):

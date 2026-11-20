@@ -250,3 +250,19 @@ def test_fk_marker_column_is_used_in_both_directions(dsn: str) -> None:
         assert [[k.id for k in p.kids] for p in parents] == [[2, 3], [1]]
 
     with_db(body, dsn)
+
+
+def test_fetch_in_sqlite_sql_and_json_param() -> None:
+    from korbase._dialect import SQLITE
+    from korbase._relations import _fetch_in
+
+    class FakeConn:
+        async def fetch(self, sql: str, args: list[Any], builder: Any) -> list[Any]:
+            self.seen = (sql, args)
+            return []
+
+    conn = FakeConn()
+    asyncio.run(_fetch_in(conn, table_meta(UserA), "id", [1, 2], False, SQLITE))  # type: ignore[arg-type]
+    sql, args = conn.seen
+    assert f'WHERE "{table_meta(UserA).name}"."id" IN (SELECT value FROM json_each(?1))' in sql
+    assert args == ["[1,2]"]
