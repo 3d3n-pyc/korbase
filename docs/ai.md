@@ -1,6 +1,6 @@
 # For AI assistants
 
-korbase is new and pre-alpha. AI assistants know little about it and may get
+korbase is new and in alpha. AI assistants know little about it and may get
 its API wrong. Give them the material below.
 
 ## The agent skill
@@ -16,9 +16,9 @@ the skill's examples.
 ## llms.txt
 
 The docs build also writes `llms.txt`, a short map of these pages for
-language models. Once the docs site is public, point the assistant at
-`https://3d3n-pyc.github.io/korbase/llms.txt`. Until then, point it at the
-files in this repository, as below.
+language models. Point the assistant at
+`https://3d3n-pyc.github.io/korbase/llms.txt`, or at the files in this
+repository, as below.
 
 ## How to point an assistant at them
 

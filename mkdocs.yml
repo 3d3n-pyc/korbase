@@ -1,5 +1,5 @@
 site_name: korbase
-site_description: An async ORM for Postgres, built the Korvex way.
+site_description: An async ORM for Postgres and SQLite, built the Korvex way.
 site_url: https://3d3n-pyc.github.io/korbase/
 repo_url: https://github.com/3d3n-pyc/korbase
 repo_name: 3d3n-pyc/korbase
@@ -52,11 +52,13 @@ plugins:
             docstring_style: null
   - llmstxt:
       markdown_description: >
-        korbase is an async ORM for Postgres, built the Korvex way: models are
-        msgspec Structs, dataclasses or TypedDicts; queries compile once to SQL
-        with $n parameters; migrations are reviewed SQL files. Driver: asyncpg.
-        Python 3.10 to 3.14. Pre-alpha: install with `pip install korbase[asyncpg]`;
-        the API may still change.
+        korbase is an async ORM for Postgres and SQLite, built the Korvex way:
+        models are msgspec Structs, dataclasses or TypedDicts; queries compile
+        once to SQL with parameters; migrations are reviewed SQL files.
+        Drivers: asyncpg for Postgres, the standard library for SQLite.
+        Python 3.10 to 3.14. Alpha, so install with `--pre`:
+        `pip install --pre "korbase[asyncpg]"` for Postgres, or
+        `pip install --pre korbase` for SQLite. The API may still change.
       full_output: llms-full.txt
       sections:
         Start:

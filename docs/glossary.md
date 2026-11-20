@@ -10,9 +10,9 @@ In korbase: every query method is async, so you write `await db.run(...)`. See [
 
 ## Backend
 
-The part that talks to the database. korbase does not speak to Postgres itself. It asks a driver to do it, and the driver is the backend. The default is asyncpg.
+The part that talks to the database. korbase does not speak to Postgres itself. It asks a driver to do it, and the driver is the backend. The default is asyncpg for Postgres. A `sqlite:` DSN uses a backend built on the standard library `sqlite3` module.
 
-In korbase: `Database.connect(dsn, backend=...)` picks one. See [Connect and close](transactions.md#connect-and-close).
+In korbase: the DSN picks the backend, and `Database.connect(dsn, backend=...)` overrides it. See [Connect and close](transactions.md#connect-and-close).
 
 ## Checksum
 
@@ -36,7 +36,7 @@ In korbase: a builder compiles itself the first time it runs. See [Compiled once
 
 Opening a connection to the database is slow, so a pool opens a few and lends them out. A query borrows one, uses it, and gives it back.
 
-In korbase: `Database` holds a pool. Its size is set with `min_size` and `max_size`. See [Pool size](korvex.md#pool-size).
+In korbase: `Database` holds a pool. Its size is set with `min_size` and `max_size` on Postgres, and with `size=` on SQLite. See [Pool size](korvex.md#pool-size) and [SQLite](sqlite.md).
 
 ## Foreign key
 
@@ -76,7 +76,7 @@ In korbase: a field typed `Optional[T]` is nullable. Any other field is `NOT NUL
 
 ## Parameter
 
-A value sent to the database separately from the SQL text. The SQL holds a placeholder (`$1`), and the value travels on its own.
+A value sent to the database separately from the SQL text. The SQL holds a placeholder (`$1` on Postgres, `?1` on SQLite), and the value travels on its own.
 
 In korbase: `param("name")` marks a value that you give when the query runs. A plain value, as in `.where(name="Ada")`, is sent the same way. A `param` compared with `==` cannot be `None`. See [Columns and parameters](queries.md#run-a-query).
 
@@ -126,7 +126,7 @@ In korbase: `make` builds your models in `korbase_scratch_<pid>_<random>`, compa
 
 An attack where a user types SQL into a form field, and the program pastes it into a query as text. The database then runs the attacker's commands. Sending values as parameters stops it.
 
-In korbase: every value is a `$n` parameter, and names are checked and quoted. Raw SQL text is not checked, so never build it from user input. See [Raw SQL](transactions.md#raw-sql).
+In korbase: every value is a parameter (`$n` on Postgres, `?n` on SQLite), and names are checked and quoted. Raw SQL text is not checked, so never build it from user input. See [Raw SQL](transactions.md#raw-sql).
 
 ## Transaction
 

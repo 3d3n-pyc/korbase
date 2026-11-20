@@ -1,16 +1,17 @@
 ---
 name: korbase
-description: Write Postgres data access with korbase, the async ORM built the Korvex way. Use when code imports korbase, or when asked to add models, queries, relations or migrations to a Korvex app.
+description: Write Postgres and SQLite data access with korbase, the async ORM built the Korvex way. Use when code imports korbase, or when asked to add models, queries, relations or migrations to a Korvex app.
 ---
 
 # korbase
 
-korbase is an async Postgres layer: models are plain classes, queries are
-immutable builders you define once and run with parameters. Python 3.10 or
-later. The API can change before 1.0: check `korbase.__version__`.
+korbase is an async ORM for Postgres and SQLite: models are plain classes,
+queries are immutable builders. Python 3.10 or later. It is Alpha: the API
+can change before 1.0, so check `korbase.__version__`.
 
-Install with `pip install korbase[asyncpg] msgspec`. Add the `korvex`
-extra to use it inside a Korvex app.
+Only alphas exist, so install with `--pre`: `pip install --pre
+"korbase[asyncpg]" msgspec` (Postgres) or `pip install --pre korbase`
+(SQLite). Add the `korvex` extra for a Korvex app.
 
 ## Models
 
@@ -47,30 +48,31 @@ A `Rel("fk_field")` field is not a column: it holds related rows filled by
 
 ## Queries
 
-Build queries at module level, once. `cols(Model)` gives columns,
-`param("x")` a named parameter filled at run time. Combine conditions with
-`&`, `|`, `~`. `.where(*conditions, **equals)` ANDs several conditions and
-`column=value` pairs; a plain value is fine when it is fixed, and a keyword
-set to `None` means `IS NULL`.
+`cols(Model)` gives columns. Combine conditions with `&`, `|`, `~`.
+`.where(*conditions, **equals)` ANDs several conditions and `column=value`
+pairs; a keyword set to `None` means `IS NULL`. Start with plain values:
 
 ```python
 from korbase import cols, delete, insert, param, select, update, upsert
 
 b = cols(Book)
+dune = select(Book).where(b.title == "Dune", author_id=1).limit(10)
+
+# A query built inside a function is compiled on every call. For one that
+# runs often, build it once at module level, with `param("x")`: a named
+# blank filled when it runs.
 BY_AUTHOR = select(Book).where(b.title != "", author_id=param("a")).order_by(b.id.asc()).limit(10)
 NEW_BOOK = insert(Book).values(title=param("t"), author_id=param("a"))
 RETITLE = update(Book).set(title=param("t")).where(id=param("id"))
 UNTITLED = delete(Book).where(b.title.is_null() | (b.title == ""))
 ```
 
-For editor and type-checker help, generate typed columns:
+For type-checker help, generate typed columns:
 `python -m korbase.stubs app.models -o app/columns.py`, then
-`from app.columns import cols`. `cols(Book).title` is a `Column[str]`, a
-typo like `.titel` or `cols(Book).id == "3"` is a type error, and `like`
-and `ilike` only accept `str` columns. It is the same object at runtime.
-Rerun the command after every model change; add `--check` to CI (exit 1 if
-the file is stale). Keyword filters `.where(title=...)` are checked at
-runtime only.
+`from app.columns import cols`. A typo like `cols(Book).titel` or
+`cols(Book).id == "3"` is a type error, and `like` and `ilike` only accept
+`str` columns. Rerun it after every model change; `--check` in CI exits 1
+if the file is stale. Keyword filters `.where(title=...)` are runtime only.
 
 Also `.offset()`, `like`, `ilike`, `in_`, `is_not_null`, `.desc()`.
 `upsert(M).on_conflict("col").values(...)` updates the other columns on a
@@ -130,12 +132,10 @@ tests. For real databases use files:
    `status` lists them.
 
 For local work, `python -m korbase.migrate dev --models app.models --dir
-migrations` runs make then apply in one step (stops on a review line).
-Never use it on production.
-
-Never edit or delete an applied file: `apply` refuses a changed one. Fix
-mistakes with a new migration. Prefer `KORBASE_DSN` to `--dsn` (visible in
-`ps`).
+migrations` runs make then apply (stops on a review line). Never use it on
+production. Never edit or delete an applied file: `apply` refuses a changed
+one; fix mistakes with a new migration. Prefer `KORBASE_DSN` to `--dsn`
+(visible in `ps`).
 
 ## Korvex
 
@@ -171,7 +171,7 @@ connection only) uses the standard library: nothing to install, SQLite
 - `migrate make` cannot alter a type, nullability, default or key in place:
   it writes a `-- korbase:review` block with `-- intended:`. Replace it with a
   table rebuild (new table, copy, drop, rename), see `docs/sqlite.md`.
-- Not in the builder yet: partial indexes, aggregates. Use raw SQL.
+- Not in the builder yet: aggregates. Use raw SQL.
 
 ## Common mistakes
 
@@ -184,10 +184,9 @@ connection only) uses the standard library: nothing to install, SQLite
   `.returning()`; they always return rows.
 - Expecting `make` to drop a removed model's table: it only diffs the
   models' tables; use `--all-tables`.
-- Changing a model and not rerunning `python -m korbase.stubs`: the
-  generated `cols` is then out of date and the type checker flags (or
-  misses) the wrong fields. Add `--check` to CI.
-- Building queries inside a hot loop or handler: build once at module level.
+- Changing a model without rerunning `python -m korbase.stubs`: the
+  generated `cols` is stale. Add `--check` to CI.
+- Building a query in a hot loop or handler: build it once, with `param()`.
 - Editing an applied migration, or applying one with a review line left.
 - Formatting values into raw SQL: pass `$1` arguments.
 

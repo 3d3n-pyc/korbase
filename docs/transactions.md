@@ -51,8 +51,8 @@ asyncio.run(main())
 
 ## Connect and close
 
-- `Database.connect(dsn)` opens the pool. It needs a driver: the default is asyncpg, installed with `pip install korbase[asyncpg]`. Pass `backend=` to use another [backend](glossary.md#backend).
-- Extra keyword arguments go to the driver. With asyncpg they go to `asyncpg.create_pool`, for example `min_size=1, max_size=10`.
+- `Database.connect(dsn)` opens the pool. A `postgresql://` DSN uses asyncpg, installed with `pip install --pre "korbase[asyncpg]"`. A `sqlite:` DSN uses the standard library `sqlite3` module and needs nothing more (see [SQLite](sqlite.md)). Pass `backend=` to use another [backend](glossary.md#backend).
+- Extra keyword arguments go to the backend. With asyncpg they go to `asyncpg.create_pool`, for example `min_size=1, max_size=10`. With SQLite they are `size=` and `busy_timeout_ms=`.
 - `validate=True` checks every row against its model with msgspec. It is off by default.
 - `await db.close()` closes the pool. `async with await Database.connect(dsn) as db:` closes it on exit.
 
@@ -114,7 +114,7 @@ async with db.transaction() as tx:
 
 ## Raw SQL
 
-Write `$1`, `$2` placeholders. Only the values are sent as arguments. The SQL text itself is not checked, so never build it from user input.
+Write `$1`, `$2` placeholders (on SQLite, `?` or `?1`, `?2`). Only the values are sent as arguments. The SQL text itself is not checked, so never build it from user input.
 
 ```python
 await db.execute("INSERT INTO users VALUES ($1, $2)", 1, "a")  # "INSERT 0 1"

@@ -24,7 +24,7 @@ to talk to Postgres.
 ```sh
 mkdir blog && cd blog
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install "korbase[asyncpg]" msgspec
+pip install --pre "korbase[asyncpg]" msgspec
 ```
 
 The database address (the DSN) goes in an environment variable, so the

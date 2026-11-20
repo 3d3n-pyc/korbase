@@ -2,7 +2,7 @@
 
 Instructions for AI coding agents working on this repository.
 
-korbase is an async ORM for Postgres, with SQLite to come. It is pure
+korbase is an async ORM for Postgres and SQLite. It is pure
 Python. Models are msgspec Structs, dataclasses or TypedDicts. It runs on
 korpg or asyncpg, and has an optional Korvex integration.
 

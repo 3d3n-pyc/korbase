@@ -1,24 +1,31 @@
 # korbase
 
-An async ORM for Postgres, built the Korvex way. You describe tables with
-plain Python classes, build queries in Python, and read rows back as the same
-classes. Its SQL migrations are files you read before they run.
+An async ORM for Postgres and SQLite, built the Korvex way. You describe
+tables with plain Python classes, build queries in Python, and read rows back
+as the same classes. Its SQL migrations are files you read before they run.
 
-It is for everyone who needs a Postgres database in Python: people who have
-never used a database, and experienced developers who want a small, typed
-and fast layer with no surprises.
+It is for everyone who needs a Postgres or SQLite database in Python: people
+who have never used a database, and experienced developers who want a small,
+typed and fast layer with no surprises.
 
 ## Status
 
-Pre-alpha. The API may change before 1.0, with no deprecation step. Each
+Alpha. The API may change before 1.0, with no deprecation step. Each
 change is in the changelog, with how to update.
 
 ## Install
 
-Python 3.10 and later, with the asyncpg driver:
+Python 3.10 and later. Only alphas exist for now, so pass `--pre`. For
+Postgres, with the asyncpg driver:
 
 ```sh
-pip install "korbase[asyncpg]" msgspec
+pip install --pre "korbase[asyncpg]" msgspec
+```
+
+For SQLite, which needs no driver:
+
+```sh
+pip install --pre korbase msgspec
 ```
 
 ## Example
@@ -82,6 +89,7 @@ each word.
 - [Transactions](transactions.md): commit, rollback, savepoints, raw SQL.
 - [Migrations](migrations.md): `make`, `apply`, `status` and review.
 - [Korvex](korvex.md): use korbase in a web app.
+- [SQLite](sqlite.md): the SQLite backend, its DSN and its differences.
 - [Testing](testing.md): run your tests on a real Postgres.
 
 **Expert?** Each guide page ends with a "Going further" section: limits,

@@ -105,9 +105,9 @@ await db.run(select(User).where(age=None))                       # age IS NULL
 | `col == x`, `col != x` | `=`, `<>` |
 | `col == None`, `col != None` | `IS NULL`, `IS NOT NULL` |
 | `<`, `<=`, `>`, `>=` | the same operator |
-| `col.like(x)`, `col.ilike(x)` | `LIKE`, `ILIKE` |
+| `col.like(x)`, `col.ilike(x)` | `LIKE`, `ILIKE` (SQLite: `LIKE` for both) |
 | `col.is_null()`, `col.is_not_null()` | `IS NULL`, `IS NOT NULL` |
-| `col.in_(values)` | `= ANY($n)`, with a list or a `param(...)` |
+| `col.in_(values)` | `= ANY($n)`, with a list or a `param(...)` (SQLite: `IN (SELECT value FROM json_each(?n))`) |
 | `a & b`, `a \| b`, `~a` | `AND`, `OR`, `NOT`, in parentheses |
 
 To say AND, put the conditions side by side in `where()`. You need `&`, `|`
@@ -259,7 +259,8 @@ This compiles once and runs as often as you like, which is the fast way.
 `param()` works in `where()` conditions, `values()`, `set()`, `limit()` and
 `offset()`. A keyword takes one too: `.where(id=param("id"))`.
 
-Postgres takes positional arguments: `$1`, `$2`. `compile()` returns the SQL
+Postgres takes positional arguments: `$1`, `$2`. SQLite writes `?1`, `?2`
+instead; the rest of this page shows Postgres. `compile()` returns the SQL
 and one slot per `$n`, in order. A slot is a `param(...)` or a fixed value.
 
 ```python
