@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any, Optional, TypedDict
+from typing import TYPE_CHECKING, Annotated, Any, Optional, TypedDict
 
 import msgspec
 import pytest
@@ -58,6 +58,9 @@ class UserInt(msgspec.Struct):
     name: int
 
 
+if TYPE_CHECKING:
+    from typing import assert_type
+
 SETUP = """
 DROP TABLE IF EXISTS posts; DROP TABLE IF EXISTS users;
 CREATE TABLE users (id int PRIMARY KEY, name text NOT NULL);
@@ -78,7 +81,7 @@ def with_db(fn: Callable[[Database], Awaitable[None]], dsn: str, **kw: Any) -> N
 
 def test_insert_select_first(dsn: str) -> None:
     async def body(db: Database) -> None:
-        q = insert(User).returning()
+        q = insert(User)
         assert await db.run(q, id=1, name="Ada") == [User(1, "Ada")]
         await db.run(insert(User).values(id=2, name="Bob"))
         await db.run(insert(User).values(id=3, name="Cy"))
@@ -87,7 +90,7 @@ def test_insert_select_first(dsn: str) -> None:
         assert [x.id for x in await db.run(sel, m=1, n=2)] == [3, 2]
         assert await db.first(select(User).where(u.name == param("n")), n="Bob") == User(2, "Bob")
         assert await db.first(select(User).where(u.name == param("n")), n="x") is None
-        assert await db.first(insert(User).values(id=9, name="Z").returning()) == User(9, "Z")
+        assert await db.first(insert(User).values(id=9, name="Z")) == User(9, "Z")
 
     with_db(body, dsn)
 
@@ -107,12 +110,12 @@ def test_update_delete_upsert(dsn: str) -> None:
     async def body(db: Database) -> None:
         await db.run(insert(User).values(id=1, name="a"))
         tag = await db.run(update(User).set(name="b").where(cols(User).id == param("i")), i=1)
-        assert tag == "UPDATE 1"
-        up = upsert(User).on_conflict("id").returning()
+        assert tag == 1
+        up = upsert(User).on_conflict("id")
         assert await db.run(up, id=1, name="c") == [User(1, "c")]
         assert await db.run(up, id=2, name="d") == [User(2, "d")]
-        assert await db.run(delete(User).where(cols(User).id == 2)) == "DELETE 1"
-        assert await db.run(delete(User).all_rows()) == "DELETE 1"
+        assert await db.run(delete(User).where(cols(User).id == 2)) == 1
+        assert await db.run(delete(User).all_rows()) == 1
         with pytest.raises(KorbaseError):
             await db.run(delete(User))
         with pytest.raises(KorbaseError):
@@ -228,5 +231,47 @@ def test_none_comparison(dsn: str) -> None:
         c = cols(Post)
         assert [p.id for p in await db.run(select(Post).where(c.title == None))] == [1]  # noqa: E711
         assert [p.id for p in await db.run(select(Post).where(c.title != None))] == [2]  # noqa: E711
+
+    with_db(body, dsn)
+
+
+def test_param_none_equality(dsn: str) -> None:
+    async def body(db: Database) -> None:
+        u = cols(User)
+        for q in (select(User).where(u.name == param("n")), select(User).where(u.name != param("n"))):
+            with pytest.raises(KorbaseError, match="is_null"):
+                await db.run(q, n=None)
+        with pytest.raises(KorbaseError, match="is_null"):
+            await db.run(select(User).where(u.name.in_(param("n"))), n=None)
+        with pytest.raises(KorbaseError, match="is_null"):
+            await db.run(select(User).where((u.name > param("n")) & (u.name == param("n"))), n=None)
+        assert await db.run(select(User).where(u.name > param("n")).limit(0), n=None) == []
+        assert await db.run(select(User).where(name=None)) == []
+
+    with_db(body, dsn)
+
+
+def test_run_types(dsn: str) -> None:
+    async def body(db: Database) -> None:
+        u = cols(User)
+        if TYPE_CHECKING:
+            assert_type(await db.run(select(User)), list[User])
+            assert_type(await db.run(insert(User).values(id=1, name="a")), list[User])
+            assert_type(await db.run(upsert(User).on_conflict("id")), list[User])
+            assert_type(await db.run(update(User).set(name="a").all_rows()), int)
+            assert_type(await db.run(update(User).set(name="a").all_rows().returning()), list[User])
+            assert_type(await db.run(delete(User).all_rows()), int)
+            assert_type(await db.run(delete(User).all_rows().returning()), list[User])
+            assert_type(await db.first(select(User)), Optional[User])
+            assert_type(await db.fetch("SELECT 1", model=User), list[User])
+            assert_type(await db.fetch("SELECT 1"), list[tuple[Any, ...]])
+            assert_type(await db.fetchrow("SELECT 1", model=User), Optional[User])
+            assert_type(await db.fetchrow("SELECT 1"), Optional[tuple[Any, ...]])
+        await db.run(insert(User).values(id=1, name="a"))
+        assert await db.run(update(User).set(name="b").where(u.id == 1)) == 1
+        assert await db.run(update(User).set(name="c").where(u.id == 1).returning()) == [User(1, "c")]
+        assert await db.run(delete(User).where(u.id == 1).returning()) == [User(1, "c")]
+        with pytest.raises(KorbaseError, match="returns rows"):
+            await db.first(delete(User).all_rows())  # type: ignore[call-overload]  # pyright: ignore
 
     with_db(body, dsn)

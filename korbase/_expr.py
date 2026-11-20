@@ -31,13 +31,18 @@ T = TypeVar("T")
 
 
 class Param:
-    """A named query parameter, filled in when the query runs."""
+    """A named query parameter, filled in when the query runs.
 
-    __slots__ = ("name",)
+    `eq` is set on the copy a compiled query keeps when the parameter is
+    compared with `==`, `!=` or `.in_()`; such a parameter cannot be `None`.
+    """
 
-    def __init__(self, name: str) -> None:
+    __slots__ = ("name", "eq")
+
+    def __init__(self, name: str, eq: bool = False) -> None:
         """Create a parameter; `name` must be a valid identifier."""
         self.name = validate_ident(name)
+        self.eq = eq
 
 
 class Value:
@@ -63,16 +68,20 @@ class ParamCollector:
         self.items: list[Union[Param, Value]] = []
         self._named: dict[str, int] = {}
 
-    def add(self, item: Union[Param, Value]) -> str:
+    def add(self, item: Union[Param, Value], eq: bool = False) -> str:
         """Register `item` and return its placeholder.
 
-        The same named parameter always gets the same placeholder.
+        The same named parameter always gets the same placeholder. `eq` says
+        the parameter is compared with `==`, `!=` or `.in_()`; it is recorded
+        on the stored slot.
         """
         if isinstance(item, Param):
             known = self._named.get(item.name)
             if known is not None:
+                if eq and not self.items[known - 1].eq:  # type: ignore[union-attr]
+                    self.items[known - 1] = Param(item.name, True)
                 return f"${known}"
-            self.items.append(item)
+            self.items.append(Param(item.name, True) if eq else item)
             self._named[item.name] = len(self.items)
         else:
             self.items.append(item)
@@ -112,11 +121,11 @@ class Expr:
         raise TypeError("use &, | and ~ instead of and, or, not to combine expressions")
 
 
-def _sql(node: Any, ctx: ParamCollector) -> str:
+def _sql(node: Any, ctx: ParamCollector, eq: bool = False) -> str:
     """Compile an operand: an expression, a param or a plain value."""
     if isinstance(node, Expr):
         return node.compile(ctx)
-    return ctx.add(node if isinstance(node, (Param, Value)) else Value(node))
+    return ctx.add(node if isinstance(node, (Param, Value)) else Value(node), eq)
 
 
 class Order:
@@ -226,7 +235,8 @@ class BinOp(Expr):
 
     def compile(self, ctx: ParamCollector) -> str:
         """Return `left op right`, right side as a placeholder."""
-        return f"{_sql(self.left, ctx)} {self.op} {_sql(self.right, ctx)}"
+        eq = self.op in ("=", "<>")
+        return f"{_sql(self.left, ctx, eq)} {self.op} {_sql(self.right, ctx, eq)}"
 
 
 class IsNull(Expr):
@@ -256,7 +266,7 @@ class InAny(Expr):
 
     def compile(self, ctx: ParamCollector) -> str:
         """Return `col = ANY($n)`."""
-        return f"{self.column.compile(ctx)} = ANY({ctx.add(self.values)})"
+        return f"{self.column.compile(ctx)} = ANY({ctx.add(self.values, True)})"
 
 
 class And(Expr):

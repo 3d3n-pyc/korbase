@@ -28,8 +28,9 @@ from korbase._diff import diff, render
 from korbase._ident import KorbaseError, quote_ident
 from korbase._inspect import inspect
 from korbase._runner import apply, status
+from korbase._schema import Snapshot
 
-__all__ = ["apply", "status", "create_all", "make", "collect_models", "main"]
+__all__ = ["apply", "status", "create_all", "make", "dev", "collect_models", "main"]
 
 _NUMBER = re.compile(r"(\d{4,})_")
 _ATTR = "__korbase_table__"
@@ -67,7 +68,12 @@ def _write_new(directory: Path, message: str, sql: str) -> Path:
     return path
 
 
-async def _changes(db: Database, models: Iterable[type]) -> str:
+def _only_tables_of(current: Snapshot, desired: Snapshot) -> Snapshot:
+    """Keep the tables of `current` that `desired` also has; other tables are not ours."""
+    return Snapshot({n: t for n, t in current.tables.items() if n in desired.tables})
+
+
+async def _changes(db: Database, models: Iterable[type], all_tables: bool = False) -> str:
     """Return the SQL moving `public` to the models, using a scratch schema that is rolled back."""
     scratch = f"korbase_scratch_{os.getpid()}_{secrets.token_hex(4)}"
     sql = ""
@@ -77,13 +83,26 @@ async def _changes(db: Database, models: Iterable[type]) -> str:
             await _ddl.create_all(conn, models, schema=scratch)
             desired = await inspect(conn, scratch)
             current = await inspect(conn, "public")
+            if not all_tables:
+                current = _only_tables_of(current, desired)
             sql = render(diff(current, desired))
             raise _Rollback
     return sql
 
 
-async def make(db: Database, models: Iterable[type], directory: str | os.PathLike[str], message: str) -> Optional[Path]:
+async def make(
+    db: Database,
+    models: Iterable[type],
+    directory: str | os.PathLike[str],
+    message: str,
+    all_tables: bool = False,
+) -> Optional[Path]:
     """Write the next migration file for the difference between `models` and `public`.
+
+    Only the tables of `models` are compared, so other tables in `public` are
+    left alone. Pass `all_tables=True` to compare the whole `public` schema:
+    that is how you drop the table of a model you removed (the drop is flagged
+    for review, and so is the drop of every other table the models do not know).
 
     Returns the new file's path, or None when nothing differs. The database is
     left untouched: the comparison runs in a transaction that is rolled back.
@@ -91,10 +110,29 @@ async def make(db: Database, models: Iterable[type], directory: str | os.PathLik
     models = list(models)
     if not models:
         raise KorbaseError("no models given")
-    sql = await _changes(db, models)
+    sql = await _changes(db, models, all_tables)
     if not sql:
         return None
     return _write_new(Path(directory), message, sql)
+
+
+async def dev(
+    db: Database, models: Iterable[type], directory: str | os.PathLike[str], message: str = "dev"
+) -> Optional[Path]:
+    """Make a migration and apply it at once; for local development only.
+
+    Returns the new file's path, or None when nothing differs. When the file
+    holds a `-- korbase:review` line, nothing is applied and KorbaseError
+    names the file and lists those lines: review it, then run `apply`.
+    """
+    path = await make(db, models, directory, message)
+    if path is None:
+        return None
+    flagged = [ln for ln in path.read_text(encoding="utf-8").splitlines() if "-- korbase:review" in ln]
+    if flagged:
+        raise KorbaseError(f"{path} needs review, nothing applied:\n" + "\n".join(flagged))
+    await apply(db, directory)
+    return path
 
 
 def collect_models(module_path: str) -> list[type]:
@@ -113,10 +151,15 @@ def collect_models(module_path: str) -> list[type]:
 def _parser() -> argparse.ArgumentParser:
     """Build the command-line parser."""
     p = argparse.ArgumentParser(prog="python -m korbase.migrate", description=__doc__)
-    p.add_argument("command", choices=["make", "apply", "status"])
+    p.add_argument("command", choices=["make", "dev", "apply", "status"])
     p.add_argument("--models", help="dotted path of the module holding the models")
     p.add_argument("--dir", default="migrations", help="migrations directory")
     p.add_argument("-m", "--message", default="migration", help="name for the new file")
+    p.add_argument(
+        "--all-tables",
+        action="store_true",
+        help="make: compare the whole public schema, not only the models' tables (needed to drop the table of a removed model)",
+    )
     p.add_argument("--dsn", help="database DSN; wins over $KORBASE_DSN (visible in `ps`: prefer the variable)")
     return p
 
@@ -129,8 +172,11 @@ async def _run(args: argparse.Namespace, dsn: str) -> None:
         raise KorbaseError("could not connect to the database") from None
     async with db:
         if args.command == "make":
-            path = await make(db, collect_models(args.models), args.dir, args.message)
+            path = await make(db, collect_models(args.models), args.dir, args.message, args.all_tables)
             print(path if path else "no changes")
+        elif args.command == "dev":
+            path = await dev(db, collect_models(args.models), args.dir, args.message)
+            print(f"applied {path}" if path else "no changes")
         elif args.command == "apply":
             for name in await apply(db, args.dir):
                 print(f"applied {name}")
@@ -146,8 +192,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if not dsn:
         print("error: set KORBASE_DSN or pass --dsn", file=sys.stderr)
         return 1
-    if args.command == "make" and not args.models:
-        print("error: make needs --models", file=sys.stderr)
+    if args.command in ("make", "dev") and not args.models:
+        print(f"error: {args.command} needs --models", file=sys.stderr)
         return 1
     try:
         asyncio.run(_run(args, dsn))
