@@ -45,13 +45,22 @@ async def _fetch_in(conn: Conn, target: TableMeta, column: str, values: list[Any
     return await conn.fetch(sql, [values], builder)
 
 
+def _fk_target(meta: TableMeta, field: str, table_name: str) -> str | None:
+    """Return the column that `meta`'s `field` references in `table_name`, if marked."""
+    for c in meta.columns:
+        if c.name == field and c.fk is not None:
+            tbl, col = c.fk.target.split(".")
+            return col if tbl == table_name else None
+    return None
+
+
 async def _load_one(conn: Conn, rows: list[Any], ref: RelRef, validate: bool) -> None:
     """Load a many-to-one relation: the foreign key is on this side."""
     target = table_meta(ref.rel.target_model)
-    pk = _single_pk(target)
     fk = ref.rel.fk_field
+    key = _fk_target(ref.table, fk, target.name) or _single_pk(target)
     values = list({v for r in rows if (v := _get(r, fk)) is not None})
-    found = {_get(t, pk): t for t in await _fetch_in(conn, target, pk, values, validate)}
+    found = {_get(t, key): t for t in await _fetch_in(conn, target, key, values, validate)}
     for row in rows:
         _set(row, ref.rel.name, found.get(_get(row, fk)))
 
@@ -59,10 +68,10 @@ async def _load_one(conn: Conn, rows: list[Any], ref: RelRef, validate: bool) ->
 async def _load_many(conn: Conn, rows: list[Any], ref: RelRef, validate: bool) -> None:
     """Load a one-to-many relation: the foreign key is on the target."""
     target = table_meta(ref.rel.target_model)
-    pk = _single_pk(ref.table)
     fk = ref.rel.fk_field
     if fk not in {c.name for c in target.columns}:
         raise KorbaseError(f"relation {ref.rel.name!r}: {target.name!r} has no column {fk!r}")
+    pk = _fk_target(target, fk, ref.table.name) or _single_pk(ref.table)
     ids = list({_get(r, pk) for r in rows})
     groups: dict[Any, list[Any]] = {}
     for child in await _fetch_in(conn, target, fk, ids, validate):

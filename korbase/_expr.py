@@ -152,12 +152,20 @@ class Column(Expr, Generic[T]):
         """Hash by table and name, so columns work as dict keys."""
         return hash((self.table.name, self.name))
 
-    def __eq__(self, other: Any) -> BinOp:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
-        """`col == x` is SQL `=`."""
+    def __eq__(self, other: Any) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
+        """`col == x` is SQL `=`; `col == None` is `IS NULL`.
+
+        Only a literal `None` is rewritten. A `param(...)` always uses `=`,
+        which never matches NULL: use `.is_null()` to test for NULL.
+        """
+        if other is None:
+            return IsNull(self, negate=False)
         return BinOp("=", self, other)
 
-    def __ne__(self, other: Any) -> BinOp:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
-        """`col != x` is SQL `<>`."""
+    def __ne__(self, other: Any) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
+        """`col != x` is SQL `<>`; `col != None` is `IS NOT NULL`."""
+        if other is None:
+            return IsNull(self, negate=True)
         return BinOp("<>", self, other)
 
     def __lt__(self, other: Any) -> BinOp:

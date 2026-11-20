@@ -50,6 +50,12 @@ def test_operators(expr: Any, text: str) -> None:
     assert sql(expr)[0] == text
 
 
+def test_none_comparison_is_null() -> None:
+    assert sql(U.age == None) == ('"users"."age" IS NULL', [])  # noqa: E711
+    assert sql(U.age != None) == ('"users"."age" IS NOT NULL', [])  # noqa: E711
+    assert sql(U.age == param("a"))[0] == '"users"."age" = $1'
+
+
 def test_in_values_are_one_array() -> None:
     assert sql(U.id.in_([1, 2]))[1] == [[1, 2]]
 

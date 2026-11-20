@@ -6,7 +6,16 @@ import copy
 from dataclasses import dataclass
 from typing import Any, Optional, Union
 
-from korbase._expr import Expr, Order, Param, ParamCollector, RelRef, Value, compile_expr
+from korbase._expr import (
+    Column,
+    Expr,
+    Order,
+    Param,
+    ParamCollector,
+    RelRef,
+    Value,
+    compile_expr,
+)
 from korbase._ident import KorbaseError, quote_ident
 from korbase._meta import TableMeta, table_meta
 
@@ -73,6 +82,13 @@ def _and(left: Optional[Any], right: Any) -> Any:
     return right if left is None else left & right
 
 
+def _cond(query: Any, expr: Any) -> Any:
+    """Return `query`'s filter combined with `expr`; `expr` must be an expression."""
+    if not isinstance(expr, Expr):
+        raise TypeError(f"where() takes a korbase expression, got {type(expr).__name__}")
+    return _and(query._where, expr)
+
+
 def _where(query: Any, ctx: ParamCollector) -> str:
     """Return the ` WHERE ...` clause, or an empty string."""
     if query._where is None:
@@ -108,11 +124,14 @@ class _Select(_Query):
 
     def where(self, expr: Expr) -> _Select:
         """Filter rows; several calls are combined with AND."""
-        return self._replace(_where=_and(self._where, expr))
+        return self._replace(_where=_cond(self, expr))
 
-    def order_by(self, *orders: Order) -> _Select:
+    def order_by(self, *orders: Union[Column[Any], Order]) -> _Select:
         """Sort rows, using `col.asc()` or `col.desc()`."""
-        return self._replace(_orders=self._orders + orders)
+        for o in orders:
+            if not isinstance(o, (Column, Order)):
+                raise TypeError(f"order_by() takes columns or .asc()/.desc(), got {type(o).__name__}")
+        return self._replace(_orders=self._orders + tuple(orders))
 
     def limit(self, value: Union[Param, int]) -> _Select:
         """Return at most `value` rows."""
@@ -167,10 +186,16 @@ class _Insert(_Query):
     def _build(self, ctx: ParamCollector) -> str:
         """Return the `INSERT` statement."""
         row = self._row()
+        if not row:
+            return f"INSERT INTO {self._table()} DEFAULT VALUES" + self._tail()
         names = ", ".join(quote_ident(k) for k in row)
         marks = ", ".join(ctx.add(v) for v in row.values())
         sql = f"INSERT INTO {self._table()} ({names}) VALUES ({marks})" + self._conflict_sql()
-        return sql + (self._returning() if self._ret else "")
+        return sql + self._tail()
+
+    def _tail(self) -> str:
+        """Return the `RETURNING` clause when asked for, else nothing."""
+        return self._returning() if self._ret else ""
 
     def _conflict_sql(self) -> str:
         """Return the `ON CONFLICT` clause; empty for a plain insert."""
@@ -194,7 +219,7 @@ class _Update(_Query):
 
     def where(self, expr: Expr) -> _Update:
         """Filter rows; several calls are combined with AND."""
-        return self._replace(_where=_and(self._where, expr))
+        return self._replace(_where=_cond(self, expr))
 
     def all_rows(self) -> _Update:
         """Allow the update to touch every row."""
@@ -221,7 +246,7 @@ class _Delete(_Query):
 
     def where(self, expr: Expr) -> _Delete:
         """Filter rows; several calls are combined with AND."""
-        return self._replace(_where=_and(self._where, expr))
+        return self._replace(_where=_cond(self, expr))
 
     def all_rows(self) -> _Delete:
         """Allow the delete to touch every row."""
@@ -251,7 +276,8 @@ class _Upsert(_Insert):
         """Return the `ON CONFLICT ... DO UPDATE` clause."""
         if not self._conflict:
             raise KorbaseError("upsert needs .on_conflict(...)")
-        keys = [k for k in self._row() if k not in self._conflict]
+        skip = set(self._conflict) | set(self._meta.pk)
+        keys = [k for k in self._row() if k not in skip]
         cl = ", ".join(quote_ident(c) for c in self._conflict)
         if not keys:
             return f" ON CONFLICT ({cl}) DO NOTHING"

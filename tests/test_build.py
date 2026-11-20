@@ -12,7 +12,7 @@ import pytest
 from korbase._asyncpg import AsyncpgBackend
 from korbase._build import named_builder, positional_builder, validating_builder
 from korbase._ident import KorbaseError
-from korbase._meta import PK, table, table_meta
+from korbase._meta import PK, Rel, table, table_meta
 
 
 @table("people")
@@ -200,3 +200,42 @@ async def _run_rollback(dsn: str) -> None:
 
 def test_asyncpg_transaction_rolls_back(dsn: str) -> None:
     asyncio.run(_run_rollback(dsn))
+
+
+@table("kw")
+class KwStruct(msgspec.Struct, kw_only=True):
+    id: Annotated[int, PK()]
+    name: str
+
+
+@table("kw")
+@dataclasses.dataclass(frozen=True)
+class InitFalse:
+    id: Annotated[int, PK()]
+    name: str = dataclasses.field(init=False)
+
+
+@table("kw")
+class RelFirst(msgspec.Struct):
+    other: Annotated[Optional[PersonStruct], Rel("id")] = None
+    id: Annotated[int, PK()] = 0
+    name: str = ""
+
+
+def test_positional_kw_only_struct() -> None:
+    assert positional_builder(table_meta(KwStruct))((1, "a")) == KwStruct(id=1, name="a")
+
+
+def test_positional_init_false_field() -> None:
+    obj = positional_builder(table_meta(InitFalse))((1, "a"))
+    assert (obj.id, obj.name) == (1, "a")
+
+
+def test_positional_rel_declared_first() -> None:
+    obj = positional_builder(table_meta(RelFirst))((7, "x"))
+    assert (obj.id, obj.name, obj.other) == (7, "x", None)
+
+
+def test_named_init_false_field() -> None:
+    obj = named_builder(InitFalse, ["name", "id"])(("a", 1))
+    assert (obj.id, obj.name) == (1, "a")

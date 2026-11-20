@@ -141,3 +141,39 @@ def test_unknown_column() -> None:
         update(User).set(nope=1)
     with pytest.raises(KorbaseError):
         upsert(User).on_conflict("nope")
+
+
+def test_upsert_never_sets_pk() -> None:
+    sql = upsert(User).on_conflict("name").compile().sql
+    assert sql.endswith('ON CONFLICT ("name") DO UPDATE SET "age" = EXCLUDED."age"')
+    assert 'SET "id"' not in sql
+    sql = upsert(User).values(id=1, name="a").on_conflict("name").compile().sql
+    assert sql.endswith('ON CONFLICT ("name") DO NOTHING')
+
+
+@pytest.mark.parametrize("bad", [True, 1, "x", None])
+def test_where_needs_expression(bad: Any) -> None:
+    with pytest.raises(TypeError):
+        update(User).set(name="a").where(bad)
+    with pytest.raises(TypeError):
+        delete(User).where(bad)
+    with pytest.raises(TypeError):
+        select(User).where(bad)
+
+
+@pytest.mark.parametrize("bad", ["name", 1, None])
+def test_order_by_needs_order(bad: Any) -> None:
+    with pytest.raises(TypeError):
+        select(User).order_by(bad)
+    sql = select(User).order_by(U.id, U.name.desc()).compile().sql
+    assert sql.endswith('ORDER BY "users"."id", "users"."name" DESC')
+
+
+def test_insert_default_values() -> None:
+    @table("tick")
+    @dataclass
+    class Tick:
+        id: Annotated[int, PK(), Default()]
+
+    assert insert(Tick).compile().sql == 'INSERT INTO "tick" DEFAULT VALUES'
+    assert insert(Tick).returning().compile().sql == ('INSERT INTO "tick" DEFAULT VALUES RETURNING "id"')

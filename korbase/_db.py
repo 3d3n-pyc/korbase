@@ -35,12 +35,26 @@ def _row_builder(query: _Query, validate: bool) -> Any:
     return positional_builder(query._meta)
 
 
-def _by_name(model: type) -> Any:
+def _by_name(model: type, validate: bool = False) -> Any:
     """Return a builder that maps a driver record to `model` by column name."""
+    if validate:
+        return _validating_by_name(model)
 
     def build(row: Any) -> Any:
         """Build one model from a record that knows its column names."""
         return named_builder(model, tuple(row.keys()))(row)
+
+    return build
+
+
+def _validating_by_name(model: type) -> Any:
+    """Return a builder that validates a record against `model` by column name."""
+    import msgspec
+
+    def build(row: Any) -> Any:
+        """Validate one record and build the model."""
+        data = dict(zip(row.keys(), row, strict=True))
+        return msgspec.convert(data, model, from_attributes=True)
 
     return build
 
@@ -54,7 +68,7 @@ class _Runner:
         """Return a context manager that yields a connection."""
         raise NotImplementedError
 
-    async def run(self, query: _Query, **params: Any) -> Any:
+    async def run(self, query: _Query, /, **params: Any) -> Any:
         """Run a query builder with `params`.
 
         A select returns a list of models. Insert or upsert with
@@ -72,7 +86,7 @@ class _Runner:
                 return await conn.fetch(compiled.sql, args, _row_builder(query, self._validate))
             return await conn.execute(compiled.sql, args)
 
-    async def first(self, query: _Query, **params: Any) -> Any:
+    async def first(self, query: _Query, /, **params: Any) -> Any:
         """Run a select (or a write with `.returning()`) and return the first model or `None`."""
         compiled = query.compile()
         args = _args(compiled, params)
@@ -86,13 +100,13 @@ class _Runner:
 
     async def fetch(self, sql: str, *args: Any, model: Optional[type] = None) -> list[Any]:
         """Run raw SQL; rows become `model` (by column name) or tuples."""
-        builder = tuple if model is None else _by_name(model)
+        builder = tuple if model is None else _by_name(model, self._validate)
         async with self._conn() as conn:
             return await conn.fetch(sql, args, builder)
 
     async def fetchrow(self, sql: str, *args: Any, model: Optional[type] = None) -> Any:
         """Run raw SQL and return the first row, or `None`."""
-        builder = tuple if model is None else _by_name(model)
+        builder = tuple if model is None else _by_name(model, self._validate)
         async with self._conn() as conn:
             return await conn.fetchrow(sql, args, builder)
 

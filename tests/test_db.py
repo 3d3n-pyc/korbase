@@ -185,3 +185,38 @@ def test_relations_not_ready(dsn: str) -> None:
         await db.run(select(Post))
 
     with_db(body, dsn)
+
+
+def test_validate_raw_model(dsn: str) -> None:
+    async def body(db: Database) -> None:
+        await db.execute("INSERT INTO users VALUES (1, 'abc')")
+        with pytest.raises(msgspec.ValidationError):
+            await db.fetch("SELECT * FROM users", model=UserInt)
+        with pytest.raises(msgspec.ValidationError):
+            await db.fetchrow("SELECT * FROM users", model=UserInt)
+        assert await db.fetchrow("SELECT * FROM users", model=User) == User(1, "abc")
+
+    with_db(body, dsn, validate=True)
+
+
+def test_param_named_query_or_self(dsn: str) -> None:
+    async def body(db: Database) -> None:
+        await db.execute("INSERT INTO users VALUES (1, 'abc')")
+        q = select(User).where(cols(User).name == param("query"))
+        assert await db.run(q, query="abc") == [User(1, "abc")]
+        assert await db.first(q, query="abc") == User(1, "abc")
+        q = select(User).where(cols(User).name == param("self"))
+        assert await db.first(q, self="abc") == User(1, "abc")
+
+    with_db(body, dsn)
+
+
+def test_none_comparison(dsn: str) -> None:
+    async def body(db: Database) -> None:
+        await db.execute("INSERT INTO users VALUES (1, 'a')")
+        await db.execute("INSERT INTO posts VALUES (1, 1, NULL), (2, 1, 'x')")
+        c = cols(Post)
+        assert [p.id for p in await db.run(select(Post).where(c.title == None))] == [1]  # noqa: E711
+        assert [p.id for p in await db.run(select(Post).where(c.title != None))] == [2]  # noqa: E711
+
+    with_db(body, dsn)

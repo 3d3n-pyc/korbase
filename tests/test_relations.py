@@ -11,7 +11,7 @@ from typing import Annotated, Any, Optional, TypedDict
 import msgspec
 import pytest
 
-from korbase import PK, Database, KorbaseError, Rel, cols, select, table
+from korbase import FK, PK, Database, KorbaseError, Rel, cols, select, table
 from korbase._meta import table_meta
 
 
@@ -213,5 +213,40 @@ def test_composite_pk_not_supported(dsn: str) -> None:
     async def body(db: Database, sqls: list[str]) -> None:
         with pytest.raises(KorbaseError, match="not supported yet"):
             await db.run(select(Pair).load(cols(Pair).kids))
+
+    with_db(body, dsn)
+
+
+@table("lg_a")
+class LegacyParent(msgspec.Struct):
+    id: Annotated[int, PK()]
+    legacy: int
+    kids: Annotated[list[LegacyChild], Rel("parent_legacy")] = msgspec.field(default_factory=list)
+
+
+@table("lg_c")
+class LegacyChild(msgspec.Struct):
+    id: Annotated[int, PK()]
+    parent_legacy: Annotated[Optional[int], FK("lg_a.legacy")]
+    parent: Annotated[Optional[LegacyParent], Rel("parent_legacy")] = None
+
+
+LEGACY_SETUP = """
+DROP TABLE IF EXISTS lg_c; DROP TABLE IF EXISTS lg_a;
+CREATE TABLE lg_a (id int PRIMARY KEY, legacy int UNIQUE NOT NULL);
+CREATE TABLE lg_c (id int PRIMARY KEY, parent_legacy int);
+INSERT INTO lg_a VALUES (1, 100), (2, 200);
+INSERT INTO lg_c VALUES (1, 200), (2, 100), (3, 100);
+"""
+
+
+def test_fk_marker_column_is_used_in_both_directions(dsn: str) -> None:
+    async def body(db: Database, sqls: list[str]) -> None:
+        await db.execute(LEGACY_SETUP)
+        kids = await db.run(select(LegacyChild).load(cols(LegacyChild).parent).order_by(cols(LegacyChild).id))
+        assert [k.parent.id for k in kids if k.parent] == [2, 1, 1]
+        assert 'WHERE "lg_a"."legacy" = ANY($1)' in sqls[-1]
+        parents = await db.run(select(LegacyParent).load(cols(LegacyParent).kids).order_by(cols(LegacyParent).id))
+        assert [[k.id for k in p.kids] for p in parents] == [[2, 3], [1]]
 
     with_db(body, dsn)
