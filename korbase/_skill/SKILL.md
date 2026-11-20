@@ -63,6 +63,15 @@ RETITLE = update(Book).set(title=param("t")).where(id=param("id"))
 UNTITLED = delete(Book).where(b.title.is_null() | (b.title == ""))
 ```
 
+For editor and type-checker help, generate typed columns:
+`python -m korbase.stubs app.models -o app/columns.py`, then
+`from app.columns import cols`. `cols(Book).title` is a `Column[str]`, a
+typo like `.titel` or `cols(Book).id == "3"` is a type error, and `like`
+and `ilike` only accept `str` columns. It is the same object at runtime.
+Rerun the command after every model change; add `--check` to CI (exit 1 if
+the file is stale). Keyword filters `.where(title=...)` are checked at
+runtime only.
+
 Also `.offset()`, `like`, `ilike`, `in_`, `is_not_null`, `.desc()`.
 `upsert(M).on_conflict("col").values(...)` updates the other columns on a
 clash. Guards: `update` and `delete` raise without `.where(...)` unless you
@@ -158,6 +167,9 @@ async def get_book(id: int, tx=Depends(kdb.transaction)):
   `.returning()`; they always return rows.
 - Expecting `make` to drop a removed model's table: it only diffs the
   models' tables; use `--all-tables`.
+- Changing a model and not rerunning `python -m korbase.stubs`: the
+  generated `cols` is then out of date and the type checker flags (or
+  misses) the wrong fields. Add `--check` to CI.
 - Building queries inside a hot loop or handler: build once at module level.
 - Editing an applied migration, or applying one with a review line left.
 - Formatting values into raw SQL: pass `$1` arguments.

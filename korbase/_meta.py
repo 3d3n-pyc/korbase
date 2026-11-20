@@ -368,7 +368,10 @@ def _check(
     _check_names(table_name, columns, indexes)
 
 
-def table(name: str, *, indexes: tuple[Index, ...] = ()) -> Callable[[type], type]:
+_Model = typing.TypeVar("_Model", bound=type)
+
+
+def table(name: str, *, indexes: tuple[Index, ...] = ()) -> Callable[[_Model], _Model]:
     """Declare a model as the table `name`.
 
     Works on msgspec Structs, dataclasses and TypedDicts. Fields marked
@@ -378,7 +381,7 @@ def table(name: str, *, indexes: tuple[Index, ...] = ()) -> Callable[[type], typ
     validate_ident(name)
     indexes = tuple(indexes)
 
-    def decorate(model: type) -> type:
+    def decorate(model: _Model) -> _Model:
         """Attach the table metadata to `model`."""
         kind, names = _kind_and_names(model)
         columns, relations = _build(model, names)

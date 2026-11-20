@@ -179,6 +179,57 @@ insert, it always returns the written row.
   columns and the primary key. The primary key is never rewritten.
 - If nothing is left to set, the upsert does nothing on conflict (`DO NOTHING`).
 
+## Typed columns
+
+`cols(Post).titel` is a typo, and by default nothing tells you until the
+query runs. Korbase can generate a small module that tells your editor which
+columns each model has and what type each one holds. Then `cols(Post).title`
+is a `Column[str]`, and `cols(Post).titel` is an error in pyright or mypy
+before you run anything. Comparing a column with the wrong type is an error
+too: `cols(Post).id == "3"` when `id` is an `int`, or `like()` on a column
+that is not a `str`.
+
+Run the command once, with the module that holds your models and the file to
+write:
+
+```sh
+python -m korbase.stubs app.models -o app/columns.py
+```
+
+Then import `cols` from the generated module instead of from `korbase`:
+
+```python
+from app.columns import cols
+from app.models import Post
+from korbase import select
+
+P = cols(Post)
+recent = select(Post).where(P.title.like("A%")).order_by(P.id.desc())
+```
+
+At runtime it is the same object as `korbase.cols(Post)`: the generated
+module only adds the types. Do not edit it by hand. Rerun the command after
+you add, rename or retype a field, and commit the file with your models. To
+make sure nobody forgets, add `--check` to your CI:
+
+```sh
+python -m korbase.stubs app.models -o app/columns.py --check
+```
+
+`--check` writes nothing. It exits with 1 and a message if the file is out of
+date.
+
+The generated module has one class per model, found by the names the models
+module gives them. It stops with an error if the module has no model, or if
+two models share a name. A field type it cannot show, such as a class of your
+own, becomes `Any`, so it is never wrongly rejected.
+
+Two limits. Keyword filters, as in `.where(title="x")`, are still checked
+only when the query is built: a typo there raises at runtime, not in the
+editor. Use `.where(P.title == "x")` when you want the editor to check it.
+And `@table` keeps the class type, so `db.run(select(Post))` is a
+`list[Post]` even without the generated module.
+
 ## Going further
 
 ### Parameters: queries built once
