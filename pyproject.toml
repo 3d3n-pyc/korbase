@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "korbase"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "Async ORM for Postgres, built the Korvex way."
 requires-python = ">=3.10"
 readme = "README.md"

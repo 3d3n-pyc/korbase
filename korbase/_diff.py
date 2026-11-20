@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from korbase._ddl import _cols
 from korbase._dialect import PG, Dialect
 from korbase._ident import quote_ident
-from korbase._schema import Column, ForeignKey, Index, Snapshot, Table
+from korbase._schema import Column, ForeignKey, Index, Snapshot, Table, normalize_where
 
 __all__ = ["Change", "diff", "render"]
 
@@ -72,7 +72,13 @@ def _fk_sql(table: str, fk: ForeignKey) -> str:
 def _index_sql(table: str, idx: Index) -> str:
     """Return the statement that creates an index."""
     unique = "UNIQUE " if idx.unique else ""
-    return f"CREATE {unique}INDEX {quote_ident(idx.name)} ON {quote_ident(table)} ({_cols(idx.columns)})"
+    where = f" WHERE {idx.where}" if idx.where else ""
+    return f"CREATE {unique}INDEX {quote_ident(idx.name)} ON {quote_ident(table)} ({_cols(idx.columns)}){where}"
+
+
+def _norm_index(idx: Index) -> Index:
+    """Return the index with its predicate normalised, so equal predicates compare equal."""
+    return replace(idx, where=normalize_where(idx.where) if idx.where else None)
 
 
 def _drop_constraint(table: str, name: str) -> str:
@@ -293,8 +299,8 @@ def _diff_indexes(cur: Table, des: Table) -> list[Change]:
     """Return the index changes of a table."""
     t = cur.name
     return _diff_keyed(
-        {i.name: i for i in cur.indexes},
-        {i.name: i for i in des.indexes},
+        {i.name: _norm_index(i) for i in cur.indexes},
+        {i.name: _norm_index(i) for i in des.indexes},
         lambda n: f"DROP INDEX {quote_ident(n)}",
         lambda i: _index_sql(t, i),
         ADD_INDEX,

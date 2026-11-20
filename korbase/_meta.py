@@ -127,17 +127,25 @@ def _literal_ok(value: Any) -> bool:
 
 @dataclass(frozen=True)
 class Index:
-    """An index over one or more columns of the table."""
+    """An index over one or more columns of the table.
+
+    `where` makes it a partial index: a raw SQL predicate, written as is
+    after `WHERE`. It must come from trusted code, never from user input.
+    """
 
     columns: tuple[str, ...]
     unique: bool = False
     name: str | None = None
+    where: str | None = None
 
-    def __init__(self, *columns: str, unique: bool = False, name: str | None = None) -> None:
-        """Build an index on `columns`."""
+    def __init__(self, *columns: str, unique: bool = False, name: str | None = None, where: str | None = None) -> None:
+        """Build an index on `columns`; raise `KorbaseError` if `where` is not a plain predicate."""
+        if where is not None and (not isinstance(where, str) or not where.strip() or ";" in where or "\0" in where):
+            raise KorbaseError(f"invalid Index where: {where!r}")
         object.__setattr__(self, "columns", tuple(columns))
         object.__setattr__(self, "unique", unique)
         object.__setattr__(self, "name", name)
+        object.__setattr__(self, "where", where)
 
 
 @dataclass(frozen=True)

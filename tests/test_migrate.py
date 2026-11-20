@@ -306,3 +306,34 @@ def test_sqlite_cli(tmp_path: Path) -> None:
     assert _cli(dsn, tmp_path, "apply", "--dir", "mig").returncode == 0
     assert _cli(dsn, tmp_path, "status", "--dir", "mig").stdout.strip() == "applied 0001_init.sql"
     assert _cli(dsn, tmp_path, "make", "--models", "ms_cli", "--dir", "mig").stdout.strip() == "no changes"
+
+
+PARTIAL = V1.replace('@table("mg_item")', '@table("mg_item", indexes=(Index("name", where="id > 0"),))').replace(
+    "import PK, table", "import PK, Index, table"
+)
+PARTIAL2 = PARTIAL.replace("id > 0", "id > 5")
+
+
+async def _partial_flow(db: Database, tmp_path: Path, tag: str) -> None:
+    """Partial index: make, apply, no drift, then a changed predicate."""
+    d = tmp_path / "mig"
+    first = await make(db, _models(tmp_path, f"mg_p1{tag}", PARTIAL), d, "init")
+    assert first is not None and "WHERE id > 0" in first.read_text()
+    await apply(db, d)
+    assert await make(db, _models(tmp_path, f"mg_p1{tag}", PARTIAL), d, "again") is None
+    second = await make(db, _models(tmp_path, f"mg_p2{tag}", PARTIAL2), d, "pred")
+    assert second is not None
+    text = second.read_text()
+    assert "DROP INDEX" in text and "WHERE id > 5" in text
+    await apply(db, d)
+    assert await make(db, _models(tmp_path, f"mg_p2{tag}", PARTIAL2), d, "again") is None
+
+
+def test_partial_index_sqlite(tmp_path: Path) -> None:
+    """A partial index round-trips on SQLite without drift."""
+    _sqlite_run(tmp_path, lambda db: _partial_flow(db, tmp_path, "s"))
+
+
+def test_partial_index_pg(dsn: str, tmp_path: Path) -> None:
+    """A partial index round-trips on Postgres without drift."""
+    _run(dsn, lambda db: _partial_flow(db, tmp_path, "p"))

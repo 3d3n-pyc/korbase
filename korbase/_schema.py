@@ -4,7 +4,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-__all__ = ["Column", "ForeignKey", "Index", "Table", "Snapshot"]
+__all__ = ["Column", "ForeignKey", "Index", "Table", "Snapshot", "normalize_where"]
+
+
+def _wrapped(text: str) -> bool:
+    """Return True when the first `(` of `text` closes at its very end."""
+    depth = 0
+    for i, ch in enumerate(text):
+        depth += (ch == "(") - (ch == ")")
+        if depth == 0:
+            return i == len(text) - 1
+    return False
+
+
+def normalize_where(text: str) -> str:
+    """Collapse whitespace and strip one level of outer parentheses."""
+    out = " ".join(text.split())
+    if out.startswith("(") and _wrapped(out):
+        out = out[1:-1].strip()
+    return out
 
 
 @dataclass(frozen=True)
@@ -36,6 +54,7 @@ class Index:
     name: str
     columns: tuple[str, ...]
     unique: bool
+    where: str | None = None
 
 
 @dataclass(frozen=True)

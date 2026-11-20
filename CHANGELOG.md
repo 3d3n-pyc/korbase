@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0a2
+
+### Added
+
+- Partial indexes, `Index(..., where=...)`, on Postgres and SQLite, with migrations.
+
 ## 0.1.0a1
 
 First alpha: models, typed queries, relations, transactions, migrations, Postgres and SQLite, Korvex integration.

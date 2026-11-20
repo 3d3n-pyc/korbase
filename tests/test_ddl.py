@@ -345,3 +345,68 @@ def test_create_all_on_sqlite(tmp_path: pathlib.Path) -> None:
     idx = {i["name"]: i for i in res["idx"]}
     assert idx["things_name_idx"]["unique"] == 1 and idx["things_custom"]["unique"] == 0
     assert "things_name_key" in idx or "sqlite_autoindex_things_1" in idx
+
+
+@table("parts", indexes=(Index("sku", unique=True, where="qty > 0"), Index("qty", name="parts_all")))
+@dataclass
+class Part:
+    """A table with a partial unique index."""
+
+    id: Annotated[int, PK()]
+    sku: str
+    qty: int
+
+
+def test_partial_index_sql() -> None:
+    """A `where` predicate ends the CREATE INDEX statement on both dialects."""
+    want = 'CREATE UNIQUE INDEX "parts_sku_idx" ON "parts" ("sku") WHERE qty > 0'
+    assert create_table_sql(table_meta(Part))[-2] == want
+    assert create_table_sql(table_meta(Part), dialect=SQLITE)[-2] == want
+    assert create_table_sql(table_meta(Part))[-1] == 'CREATE INDEX "parts_all" ON "parts" ("qty")'
+
+
+@pytest.mark.parametrize("where", ["", "  ", "a; DROP TABLE x", "a\0b", 5])
+def test_partial_index_invalid_where(where: Any) -> None:
+    """An empty predicate, a semicolon or a NUL byte is rejected."""
+    with pytest.raises(KorbaseError):
+        Index("a", where=where)
+
+
+def test_partial_index_on_sqlite(tmp_path: pathlib.Path) -> None:
+    """The SQLite schema keeps the WHERE of the partial index."""
+
+    async def main() -> str:
+        pool = await SqliteBackend().connect(f"sqlite:///{tmp_path / 'p.db'}")
+        try:
+            async with pool.acquire() as conn:
+                await create_all(conn, [Part], dialect=SQLITE)
+                _, rows = await conn.fetch_columns("SELECT sql FROM sqlite_schema WHERE name = 'parts_sku_idx'", [])
+                return str(rows[0][0])
+        finally:
+            await pool.close()
+
+    assert "WHERE qty > 0" in asyncio.run(main())
+
+
+def test_partial_index_on_postgres(dsn: str) -> None:
+    """Postgres reports the WHERE of the partial index."""
+
+    async def main() -> str:
+        pool = await AsyncpgBackend().connect(dsn)
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute_script(
+                    "DROP SCHEMA IF EXISTS korbase_test_partial CASCADE; CREATE SCHEMA korbase_test_partial"
+                )
+                try:
+                    await create_all(conn, [Part], "korbase_test_partial")
+                    _, rows = await conn.fetch_columns(
+                        "SELECT pg_get_indexdef('korbase_test_partial.parts_sku_idx'::regclass)", []
+                    )
+                    return str(rows[0][0])
+                finally:
+                    await conn.execute_script("DROP SCHEMA IF EXISTS korbase_test_partial CASCADE")
+        finally:
+            await pool.close()
+
+    assert "WHERE (qty > 0)" in asyncio.run(main())
