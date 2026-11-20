@@ -121,3 +121,40 @@ def test_encoded_datetimes_sort_in_time_order() -> None:
     shuffled = [m.astimezone(zones[i % 3]) for i, m in enumerate(reversed(moments))]
     texts = sorted(SQLITE.encode_param(m) for m in shuffled)
     assert [SQLITE.decode_value(dt.datetime, t) for t in texts] == moments
+
+
+class Level(enum.IntEnum):
+    LOW = 1
+    HIGH = 2
+
+
+class Plain(enum.Enum):
+    A = 1
+    B = 2
+
+
+def test_sqlite_enum_types_and_values() -> None:
+    assert SQLITE.sql_type(Level) == "INTEGER"
+    assert SQLITE.sql_type(Plain) == "INTEGER"
+    assert SQLITE.sql_type(Color) == "TEXT"
+    assert SQLITE.encode_param(Level.HIGH) == 2
+    assert type(SQLITE.encode_param(Level.HIGH)) is int
+    assert SQLITE.decode_value(Level, 2) is Level.HIGH
+    assert SQLITE.decode_value(Color, "red") is Color.RED
+
+
+def test_sqlite_enum_decode_failure() -> None:
+    with pytest.raises(KorbaseError, match="Level"):
+        SQLITE.decode_value(Level, 9)
+
+
+def test_sqlite_nan_rejected_inf_ok() -> None:
+    with pytest.raises(KorbaseError, match="NaN"):
+        SQLITE.encode_param(float("nan"))
+    assert SQLITE.encode_param(float("inf")) == float("inf")
+    assert SQLITE.encode_param(float("-inf")) == float("-inf")
+
+
+def test_sqlite_bytes_in_list_rejected() -> None:
+    with pytest.raises(KorbaseError, match="bytes"):
+        SQLITE.encode_param([b"a"])

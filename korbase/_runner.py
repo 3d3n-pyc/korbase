@@ -124,9 +124,35 @@ async def _body(conn: Conn, f: _File, dialect: Dialect) -> bool:
     return True
 
 
+async def _claim(conn: Conn, f: _File) -> bool:
+    """Insert the version row of `f` in a short write transaction; False if another apply holds it."""
+    async with conn.transaction():
+        mark = SQLITE.placeholder(1)
+        if await conn.fetch(f"SELECT 1 FROM korbase_migrations WHERE name = {mark}", [f.name], tuple):
+            return False
+        await _record(conn, f, SQLITE)
+    return True
+
+
+async def _run_claimed(conn: Conn, f: _File) -> bool:
+    """Run a no-transaction file on SQLite after claiming it; release the claim if it fails."""
+    if not await _claim(conn, f):
+        return False
+    try:
+        await conn.execute_script(f.text)
+    except BaseException:
+        async with conn.transaction():
+            mark = SQLITE.placeholder(1)
+            await conn.execute(f"DELETE FROM korbase_migrations WHERE name = {mark}", [f.name])
+        raise
+    return True
+
+
 async def _run_file(conn: Conn, f: _File, dialect: Dialect) -> bool:
     """Run one file, in a transaction unless it opts out; False when it was already applied."""
     try:
+        if f.text.startswith(_NO_TX) and dialect.name == "sqlite":
+            return await _run_claimed(conn, f)
         if f.text.startswith(_NO_TX):
             return await _body(conn, f, dialect)
         async with conn.transaction():
@@ -176,6 +202,12 @@ async def apply(db: Database, directory: str | os.PathLike[str]) -> list[str]:
     `-- korbase:review`. A file whose first line is `-- korbase:no-transaction`
     runs outside a transaction. It stops at the first failing file; earlier
     files stay applied.
+
+    On SQLite a no-transaction file is claimed first: its version row is
+    inserted in a short write transaction, then the file runs. If it fails,
+    the row is deleted. If the process crashes in between, the row stays and
+    the file counts as applied; check what the file did, then delete its row
+    from `korbase_migrations` to run it again.
     """
     files = _read_files(directory)
     async with db._conn() as conn:

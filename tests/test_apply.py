@@ -237,3 +237,35 @@ def test_sqlite_concurrent_apply(tmp_path: Path) -> None:
         assert sorted(n for x in ran for n in x) == sorted(f"000{i}_t{i}.sql" for i in range(1, 6))
 
     _sqlite_run(tmp_path, body)
+
+
+def test_sqlite_concurrent_no_transaction(tmp_path: Path) -> None:
+    """Two applies run a no-transaction file once and both succeed."""
+    d = tmp_path / "mig"
+    d.mkdir()
+    _write(d, "0001_a.sql", "-- korbase:no-transaction\nCREATE TABLE m_a (id int);\nINSERT INTO m_a VALUES (1);")
+
+    async def body(a: Database, b: Database) -> None:
+        """Race the two."""
+        results = await asyncio.gather(apply(a, d), apply(b, d))
+        assert sorted(n for r in results for n in r) == ["0001_a.sql"]
+        assert await a.fetch("SELECT count(*) FROM m_a") == [(1,)]
+
+    _sqlite_run(tmp_path, body)
+
+
+def test_sqlite_failed_no_transaction_leaves_no_row(tmp_path: Path) -> None:
+    """A failing no-transaction file is not recorded and can be retried."""
+    d = tmp_path / "mig"
+    d.mkdir()
+    _write(d, "0001_a.sql", "-- korbase:no-transaction\nSELECT * FROM nope;")
+
+    async def body(a: Database, _b: Database) -> None:
+        """Fail, check, fix, retry."""
+        with pytest.raises(KorbaseError, match="0001_a.sql"):
+            await apply(a, d)
+        assert await status(a, d) == [("0001_a.sql", "pending")]
+        _write(d, "0001_a.sql", "-- korbase:no-transaction\nSELECT 1;")
+        assert await apply(a, d) == ["0001_a.sql"]
+
+    _sqlite_run(tmp_path, body)

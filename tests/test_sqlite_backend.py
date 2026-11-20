@@ -147,3 +147,92 @@ async def _test_close_stops_threads(tmp_path: Path) -> None:
         await c.fetch("SELECT 1", [], _row)
     await pool.close()
     assert not [t for t in threading.enumerate() if t.name.startswith("korbase-sqlite")]
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    ["sqlite://x.db", "sqlite://:memory:", "sqlite:///a.db?mode=ro", "sqlite:x.db", "sqlite:///", "postgres://h/d"],
+)
+def test_bad_dsn(dsn: str) -> None:
+    from korbase._ident import KorbaseError
+
+    with pytest.raises(KorbaseError, match="sqlite:///relative.db"):
+        asyncio.run(SqliteBackend().connect(dsn))
+
+
+def test_script_statements_on_one_line() -> None:
+    asyncio.run(_test_script_statements_on_one_line())
+
+
+async def _test_script_statements_on_one_line() -> None:
+    pool = await SqliteBackend().connect("sqlite::memory:")
+    async with pool.acquire() as c:
+        await c.execute_script("CREATE TABLE a(x); CREATE TABLE b(y); INSERT INTO a VALUES (';'); -- c;d\nSELECT 1")
+        assert await c.fetch("SELECT x FROM a", [], _row) == [(";",)]
+        assert await c.fetch("SELECT count(*) FROM b", [], _row) == [(0,)]
+    await pool.close()
+
+
+def test_select_tag_counts_rows() -> None:
+    asyncio.run(_test_select_tag_counts_rows())
+
+
+async def _test_select_tag_counts_rows() -> None:
+    pool = await SqliteBackend().connect("sqlite::memory:")
+    async with pool.acquire() as c:
+        assert await c.execute("SELECT 1 UNION SELECT 2 UNION SELECT 3", []) == "SELECT 3"
+        assert await c.execute("SELECT 1 WHERE 0", []) == "SELECT 0"
+    await pool.close()
+
+
+def test_cancel_in_begin_releases_lock(tmp_path: Path) -> None:
+    asyncio.run(_test_cancel_in_begin_releases_lock(tmp_path))
+
+
+async def _test_cancel_in_begin_releases_lock(tmp_path: Path) -> None:
+    path = tmp_path / "a.db"
+    pool = await SqliteBackend().connect(f"sqlite:///{path}", busy_timeout_ms=1500)
+    async with pool.acquire() as c:
+        await c.execute("CREATE TABLE t (x INTEGER)", [])
+    other = sqlite3.connect(path, isolation_level=None, timeout=0.5)
+    other.execute("BEGIN IMMEDIATE")
+
+    async def work() -> None:
+        async with pool.acquire() as c, c.transaction():
+            await c.execute("INSERT INTO t VALUES (1)", [])
+
+    task = asyncio.ensure_future(work())
+    await asyncio.sleep(0.2)
+    task.cancel()
+    other.execute("COMMIT")
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    other.execute("INSERT INTO t VALUES (2)")
+    async with pool.acquire() as c:
+        assert not c._db.in_transaction  # type: ignore[attr-defined]
+        async with c.transaction():
+            await c.execute("INSERT INTO t VALUES (3)", [])
+        assert await c.fetch("SELECT x FROM t ORDER BY x", [], _row) == [(2,), (3,)]
+    other.close()
+    await pool.close()
+
+
+def test_release_rolls_back_open_transaction(tmp_path: Path) -> None:
+    asyncio.run(_test_release_rolls_back_open_transaction(tmp_path))
+
+
+async def _test_release_rolls_back_open_transaction(tmp_path: Path) -> None:
+    pool = await _file_pool(tmp_path)
+    async with pool.acquire() as c:
+        await c.execute("CREATE TABLE t (x INTEGER)", [])
+        await c.execute("BEGIN IMMEDIATE", [])
+    async with pool.acquire() as c:
+        assert not c._db.in_transaction  # type: ignore[attr-defined]
+    await pool.close()
+
+
+def test_tag_skips_leading_comments() -> None:
+    from korbase._sqlite import _tag
+
+    assert _tag("-- why\n/* note */ UPDATE t SET x = 1", 2) == "UPDATE 2"
+    assert _tag("  /* a\nb */\n-- c\nINSERT INTO t VALUES (1)", 1) == "INSERT 0 1"

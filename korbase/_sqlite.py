@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +12,7 @@ from typing import Any, TypeVar
 
 from korbase._backend import M, Pool, RowBuilder
 from korbase._dialect import SQLITE
+from korbase._ident import KorbaseError
 
 __all__ = ["SqliteBackend"]
 
@@ -21,21 +23,23 @@ _MEMORY = ":memory:"
 
 def _parse_dsn(dsn: str) -> str:
     """Return the database path of a `sqlite:` DSN, or `:memory:`."""
-    if not dsn.startswith("sqlite:"):
-        raise ValueError(f"not a sqlite DSN: {dsn!r}")
-    rest = dsn[len("sqlite:") :]
-    if rest.startswith("//"):
-        rest = rest[2:]
-        # `sqlite:///x` -> "/x" -> relative "x"; `sqlite:////x` -> "//x" -> absolute "/x"
-        rest = rest[1:]
-    if not rest:
-        raise ValueError("empty sqlite database path")
-    return rest
+    if dsn == "sqlite::memory:":
+        return _MEMORY
+    path = dsn[len("sqlite:///") :] if dsn.startswith("sqlite:///") else ""
+    # `sqlite:///x` -> relative "x"; `sqlite:////x` -> absolute "/x"
+    if not path or "?" in path or "\x00" in path:
+        raise KorbaseError(
+            "unsupported sqlite DSN: expected sqlite:///relative.db, sqlite:////absolute/path.db or sqlite::memory:"
+        )
+    return path
+
+
+_LEADING_COMMENTS = re.compile(r"\A(?:\s+|--[^\n]*(?:\n|\Z)|/\*.*?\*/)*", re.S)
 
 
 def _tag(sql: str, rowcount: int) -> str:
     """Build a Postgres-like status tag from the statement kind and row count."""
-    words = sql.split(None, 1)
+    words = _LEADING_COMMENTS.sub("", sql).split(None, 1)
     kind = words[0].upper() if words else ""
     n = max(rowcount, 0)
     if kind == "INSERT":
@@ -51,11 +55,12 @@ def _split_statements(sql: str) -> list[str]:
     """Split a SQL text into complete statements (triggers and string literals stay whole)."""
     statements: list[str] = []
     current = ""
-    for line in sql.splitlines(keepends=True):
-        current += line
+    for piece in sql.split(";"):
+        current += piece + ";"
         if sqlite3.complete_statement(current):
             statements.append(current)
             current = ""
+    current = current[:-1]
     if current.strip():
         statements.append(current)
     return statements
@@ -78,8 +83,40 @@ class _SqliteConn:
         self._depth = 0
 
     async def _run(self, fn: Callable[[], T]) -> T:
-        """Run `fn` on this connection's thread."""
-        return await asyncio.get_running_loop().run_in_executor(self._executor, fn)
+        """Run `fn` on this connection's thread; if cancelled, let it finish, then roll back."""
+        fut = asyncio.get_running_loop().run_in_executor(self._executor, fn)
+        try:
+            return await asyncio.shield(fut)
+        except asyncio.CancelledError:
+            await self._settle(fut)
+            await self.reset()
+            raise
+
+    @staticmethod
+    async def _settle(fut: asyncio.Future[Any]) -> None:
+        """Wait until `fut` is done, even if cancelled again meanwhile."""
+        while not fut.done():
+            try:
+                await asyncio.wait([fut])
+            except asyncio.CancelledError:
+                continue
+        if not fut.cancelled():
+            fut.exception()  # mark as retrieved
+
+    async def reset(self) -> None:
+        """Roll back any open transaction and forget the nesting depth."""
+        if self._db is None or not self._db.in_transaction:
+            self._depth = 0
+            return
+        fut = asyncio.get_running_loop().run_in_executor(self._executor, self._rollback)
+        await self._settle(fut)
+        self._depth = 0
+
+    def _rollback(self) -> None:
+        """Roll back the open transaction, if any (worker thread)."""
+        db = self._conn()
+        if db.in_transaction:
+            db.execute("ROLLBACK")
 
     async def open(self) -> None:
         """Open the database and apply the settings."""
@@ -129,8 +166,8 @@ class _SqliteConn:
 
         def work() -> str:
             cur = self._conn().execute(sql, bound)
-            cur.fetchall()
-            return _tag(sql, cur.rowcount)
+            rows = cur.fetchall()
+            return _tag(sql, cur.rowcount if cur.rowcount >= 0 else len(rows))
 
         return await self._run(work)
 
@@ -158,10 +195,10 @@ class _SqliteConn:
         try:
             yield
         except BaseException:
-            self._depth -= 1
+            self._depth = max(self._depth - 1, 0)
             await self._finish(nested, name, commit=False)
             raise
-        self._depth -= 1
+        self._depth = max(self._depth - 1, 0)
         await self._finish(nested, name, commit=True)
 
     async def _finish(self, nested: bool, name: str, *, commit: bool) -> None:
@@ -172,6 +209,8 @@ class _SqliteConn:
             stmts = ["COMMIT" if commit else "ROLLBACK"]
 
         def work() -> None:
+            if not commit and not self._conn().in_transaction:
+                return  # already rolled back (after a cancellation)
             for s in stmts:
                 self._conn().execute(s)
 
@@ -206,7 +245,11 @@ class _SqlitePool:
         try:
             yield conn
         finally:
-            self._queue.put_nowait(conn)
+            try:
+                if conn._db is not None and conn._db.in_transaction:
+                    await conn.reset()
+            finally:
+                self._queue.put_nowait(conn)
 
     async def close(self) -> None:
         """Close every connection and stop the threads."""

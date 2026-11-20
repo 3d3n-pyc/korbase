@@ -50,7 +50,8 @@ def sqlite_type(py_type: Any) -> str:
     tp = _strip_optional(py_type)
     found = _SQLITE_TYPES.get(typing.get_origin(tp) or tp)
     if found is None and isinstance(tp, type) and issubclass(tp, enum.Enum):
-        found = "TEXT"
+        ints = all(type(m.value) is int for m in tp)
+        found = "INTEGER" if ints and len(tp) else "TEXT"
     if found is None:
         raise KorbaseError(f"no SQLite type for {py_type!r}")
     return found
@@ -58,6 +59,8 @@ def sqlite_type(py_type: Any) -> str:
 
 def _json_default(value: Any) -> Any:
     """Make the non-JSON types that can sit inside a list or dict serializable."""
+    if isinstance(value, bytes):
+        raise KorbaseError("SQLite cannot put bytes in a JSON value or in_() list; use raw SQL or hex text")
     encoded = _sqlite_encode(value)
     if encoded is value:
         raise TypeError(f"not JSON serializable: {value!r}")
@@ -70,6 +73,8 @@ def _sqlite_encode(value: Any) -> Any:
         return int(value)
     if isinstance(value, enum.Enum):
         return _sqlite_encode(value.value)
+    if isinstance(value, float) and value != value:
+        raise KorbaseError("SQLite cannot store NaN")
     if isinstance(value, (uuid.UUID, Decimal)):
         return str(value)
     if isinstance(value, datetime.datetime):
@@ -104,7 +109,10 @@ def _sqlite_decode(tp: Any, raw: Any) -> Any:
     if base in (dict, list):
         return json.loads(raw)
     if isinstance(base, type) and issubclass(base, enum.Enum):
-        return base(raw)
+        try:
+            return base(raw)
+        except ValueError as exc:
+            raise KorbaseError(f"cannot decode {raw!r} as {base.__name__}") from exc
     return raw
 
 
