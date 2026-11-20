@@ -38,6 +38,10 @@ class _AsyncpgConn:
         """Run `sql` and return the status tag."""
         return await self._conn.execute(sql, *args)
 
+    async def execute_script(self, sql: str) -> None:
+        """Run a multi-statement SQL text with the simple protocol."""
+        await self._conn.execute(sql)
+
     def transaction(self) -> AbstractAsyncContextManager[None]:
         """Open an asyncpg transaction."""
         return self._conn.transaction()  # type: ignore[no-any-return]

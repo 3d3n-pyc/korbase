@@ -17,7 +17,7 @@ from korbase._backend import Backend
 from korbase._db import Database, Transaction
 from korbase._expr import cols, param
 from korbase._ident import KorbaseError
-from korbase._meta import FK, PK, Default, Index, Rel, Unique, table
+from korbase._meta import FK, PK, Default, Index, Rel, SqlType, Unique, table
 from korbase._query import delete, insert, select, update, upsert
 
 __all__ = [
@@ -26,6 +26,7 @@ __all__ = [
     "FK",
     "Unique",
     "Default",
+    "SqlType",
     "Index",
     "Rel",
     "cols",

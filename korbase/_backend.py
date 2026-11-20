@@ -48,6 +48,13 @@ class Conn(Protocol):
         """Run `sql` and return the driver's status tag, such as `INSERT 0 1`."""
         ...
 
+    def execute_script(self, sql: str) -> Awaitable[None]:
+        """Run a multi-statement SQL text as written, with no parameters.
+
+        Used by migrations.
+        """
+        ...
+
     def transaction(self) -> AbstractAsyncContextManager[None]:
         """Open a transaction: commit on success, roll back on error."""
         ...
