@@ -24,12 +24,13 @@ def snap(*tables: Table) -> Snapshot:
 
 
 ID = col("id", "bigint", False)
+SET = "SET standard_conforming_strings = on;\n"
 BASE = tbl("a", (ID, col("x")))
 
 
 def sql_of(current: Snapshot, desired: Snapshot) -> str:
-    """Return the rendered diff."""
-    return render(diff(current, desired))
+    """Return the rendered diff, without the leading SET."""
+    return render(diff(current, desired)).removeprefix(SET)
 
 
 def test_noop():
@@ -231,3 +232,9 @@ def test_add_not_null_column_without_default_review():
         "-- korbase:review NOT NULL column without default fails on a non-empty table\n"
         'ALTER TABLE "a" ADD COLUMN "y" integer NOT NULL;\n'
     )
+
+
+def test_render_sets_standard_conforming_strings() -> None:
+    """Generated files start with the SET."""
+    out = render(diff(snap(), snap(BASE)))
+    assert out.startswith(SET)

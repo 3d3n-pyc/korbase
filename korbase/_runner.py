@@ -135,7 +135,10 @@ async def apply(db: Database, directory: str | os.PathLike[str]) -> list[str]:
     done: list[str] = []
     async with db._conn() as conn:
         await conn.execute("SELECT pg_advisory_lock($1)", [_LOCK_KEY])
+        before = None
         try:
+            before = (await conn.fetch("SELECT current_setting('standard_conforming_strings')", [], tuple))[0][0]
+            await conn.execute("SELECT set_config('standard_conforming_strings', 'on', false)", [])
             await conn.execute_script(_TABLE)
             applied = await _applied(conn)
             pending = _check(files, _classify(files, applied), applied)
@@ -143,6 +146,8 @@ async def apply(db: Database, directory: str | os.PathLike[str]) -> list[str]:
                 await _run_file(conn, f)
                 done.append(f.name)
         finally:
+            if before is not None:
+                await conn.execute("SELECT set_config('standard_conforming_strings', $1, false)", [before])
             await conn.execute("SELECT pg_advisory_unlock($1)", [_LOCK_KEY])
     return done
 

@@ -276,6 +276,12 @@ def diff(current: Snapshot, desired: Snapshot) -> list[Change]:
     return [c for c in ordered if not (c.sql in seen or seen.add(c.sql))]
 
 
+_SET_STRINGS = "SET standard_conforming_strings = on;\n"
+
+
 def render(changes: list[Change]) -> str:
-    """Return the SQL file body for `changes`: comment lines, then each statement ending in `;`."""
-    return "".join("".join(f"{c}\n" for c in ch.comments) + ch.sql + ";\n" for ch in changes)
+    """Return the SQL file body for `changes`: `SET standard_conforming_strings = on;`, then comment lines and each statement ending in `;`."""
+    if not changes:
+        return ""
+    body = "".join("".join(f"{c}\n" for c in ch.comments) + ch.sql + ";\n" for ch in changes)
+    return _SET_STRINGS + body

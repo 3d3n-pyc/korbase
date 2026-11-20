@@ -13,7 +13,7 @@ from korbase import Database
 from korbase._ident import KorbaseError
 from korbase._runner import apply, status
 
-TABLES = ("korbase_migrations", "m_a", "m_b", "m_c")
+TABLES = ("korbase_migrations", "m_a", "m_b", "m_c", "m_scs")
 
 
 def _write(directory: Path, name: str, text: str) -> None:
@@ -163,5 +163,26 @@ def test_concurrent_apply(dsn: str, tmp_path: Path) -> None:
         async with await Database.connect(dsn) as other:
             first, second = await asyncio.gather(apply(db, tmp_path), apply(other, tmp_path))
         assert sorted(first + second) == ["0001_a.sql", "0002_b.sql"]
+
+    _run(dsn, body)
+
+
+def test_standard_conforming_strings_forced_on(dsn: str, tmp_path: Path) -> None:
+    """Files run with standard_conforming_strings on, whatever the role default."""
+    _write(
+        tmp_path,
+        "0001_a.sql",
+        "CREATE TABLE m_scs (v text);\nINSERT INTO m_scs SELECT current_setting('standard_conforming_strings');",
+    )
+
+    async def body(db: Database) -> None:
+        """Set the role default off, apply, read the recorded value."""
+        await db.execute("ALTER ROLE CURRENT_USER SET standard_conforming_strings = off")
+        try:
+            await apply(db, tmp_path)
+        finally:
+            await db.execute("ALTER ROLE CURRENT_USER RESET standard_conforming_strings")
+        rows = await db.fetch("SELECT v FROM m_scs")
+        assert rows == [("on",)]
 
     _run(dsn, body)
