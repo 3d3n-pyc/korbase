@@ -21,11 +21,15 @@ uv run pytest
 ```
 
 Tests need a Postgres server, named by the `KORBASE_TEST_DSN` environment
-variable. To start one:
+variable. To start one, run `bash tests/pg/start.sh`. It starts Postgres 18 in
+Docker on port 55433 and prints the export line:
 
 ```sh
-docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:18
+eval "$(bash tests/pg/start.sh | grep '^export')"
 ```
+
+Async tests call `asyncio.run` inside a plain test function. Do not add
+pytest-asyncio.
 
 ## Rules
 
