@@ -23,7 +23,7 @@ import asyncio
 from typing import Annotated, Optional
 
 import msgspec
-from korbase import FK, PK, Database, Rel, cols, insert, param, select, table
+from korbase import FK, PK, Database, Rel, cols, insert, select, table
 
 DSN = "postgresql://user:password@localhost:5432/scratch"
 
@@ -52,11 +52,11 @@ async def main() -> None:
                                 author_id bigint NOT NULL REFERENCES users(id), title text NOT NULL);
             """
         )
-        ada = await db.first(insert(User).values(name="Ada").returning())
+        [ada] = await db.run(insert(User).values(name="Ada"))  # insert returns the new row
         await db.run(insert(Post).values(author_id=ada.id, title="Hello"))
 
-        users = await db.run(select(User).where(cols(User).name == param("name")), name="Ada")
-        print(users)  # [User(id=1, name='Ada', posts=[])]
+        users = await db.run(select(User).where(name="Ada"))
+        print(users)  # [User(id=1, name='Ada')]
 
         posts = await db.run(select(Post).load(cols(Post).author))
         print([(x.title, x.author.name if x.author else None) for x in posts])

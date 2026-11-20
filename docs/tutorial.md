@@ -49,7 +49,7 @@ from typing import Annotated, Optional
 
 import msgspec
 
-from korbase import FK, PK, Database, KorbaseError, Rel, cols, delete, insert, param, select, table, update
+from korbase import FK, PK, Database, KorbaseError, Rel, cols, delete, insert, select, table, update
 
 
 @table("authors")
@@ -135,8 +135,8 @@ async def main() -> None:
     async with await Database.connect(os.environ["KORBASE_DSN"]) as db:
         a, p = cols(Author), cols(Post)
 
-        ada = await db.first(insert(Author).values(name="Ada").returning())
-        bob = await db.first(insert(Author).values(name="Bob").returning())
+        [ada] = await db.run(insert(Author).values(name="Ada"))
+        [bob] = await db.run(insert(Author).values(name="Bob"))
         await db.run(insert(Post).values(author_id=ada.id, title="Hello"))
         await db.run(insert(Post).values(author_id=ada.id, title="Second thoughts"))
         await db.run(insert(Post).values(author_id=bob.id, title="Bob's first"))
@@ -147,34 +147,44 @@ if __name__ == "__main__":
 ```
 
 `cols(Author)` gives you the columns of a model, to use in filters. The
-database chooses each `id`; `.returning()` hands the new row back so you
-can use its `id`. Without it, `insert` returns only a short status text.
-`db.first` returns one model, or `None`.
+database chooses each `id`, so an insert always hands the new row back, as
+a list with one `Author`. `[ada] =` takes that row out of the list, and you
+can use `ada.id` right away.
 
-## 5. Query with parameters
+## 5. Query and filter
 
 You almost never want every row. `where` filters, `order_by` sorts and
-`limit` caps the count. The values you filter on change, so you pass them as
-[parameters](glossary.md#parameter): a named placeholder, `param("author")`,
-filled in when the query runs. A value never becomes part of the SQL text,
-so user input cannot change the meaning of a query. Add, inside the block:
+`limit` caps the count. Write the values you filter on as plain Python
+values. korbase sends them to the database apart from the SQL text, so user
+input cannot change the meaning of a query. Add, inside the block:
 
 ```python
-        found = await db.run(
-            select(Post).where(p.author_id == param("author")).order_by(p.title.asc()).limit(param("n")),
-            author=ada.id,
-            n=10,
-        )
+        found = await db.run(select(Post).where(author_id=ada.id).order_by(p.title.asc()).limit(10))
         print([x.title for x in found])  # ['Hello', 'Second thoughts']
 
-        one = await db.first(select(Author).where(a.name == param("name")), name="Bob")
+        hello = await db.run(select(Post).where(p.title.like("H%"), author_id=ada.id))
+        print([x.title for x in hello])  # ['Hello']
+
+        one = await db.first(select(Author).where(name="Bob"))
         if one:
             print(one.name)  # Bob
 ```
 
-`db.run` returns a list of `Post` objects, the same class you declared.
-`select(...)` only describes a query. Nothing reaches the database until
-you give it to `db.run` or `db.first`.
+`where(author_id=ada.id)` means "the posts whose `author_id` equals this".
+For anything else than equal, write a condition with the columns:
+`p.title.like("H%")`. Give `where` several, and they must all hold.
+
+`db.run` returns a list of `Post` objects, the same class you declared, and
+your editor knows it: type `x.` and it offers `title`, `author_id` and the
+other fields. `db.first` returns one model or `None`, so the editor asks
+you to check, which is why the code says `if one:`. `select(...)` only
+describes a query. Nothing reaches the database until you give it to
+`db.run` or `db.first`.
+
+A query that runs many times with different values can be built once, with a
+named blank, `param("n")`, that you fill in at each run. That is a speed-up
+for later, in [Queries](queries.md#parameters-queries-built-once). You do not
+need it here.
 
 ## 6. Update, delete, and the where() guard
 
@@ -183,10 +193,10 @@ Changing the wrong rows is a classic database mistake: an `UPDATE` or
 unless you write `.where(...)`, or say `.all_rows()` on purpose. Add:
 
 ```python
-        print(await db.run(update(Post).set(title="Hello, world").where(p.title == param("old")), old="Hello"))
-        print(await db.run(delete(Post).where(p.title == "Second thoughts")))
-        # UPDATE 1
-        # DELETE 1
+        print("updated", await db.run(update(Post).set(title="Hello, world").where(title="Hello")))
+        print("deleted", await db.run(delete(Post).where(title="Second thoughts")))
+        # updated 1
+        # deleted 1
 
         try:
             await db.run(delete(Post))  # no where()
@@ -194,8 +204,9 @@ unless you write `.where(...)`, or say `.all_rows()` on purpose. Add:
             print(exc)  # delete without where; call .all_rows() to confirm
 ```
 
-A write without `.returning()` gives back the command tag, such as
-`UPDATE 1`: the number of rows it changed.
+An `update` or `delete` gives back the number of rows it changed, as an
+`int`: here `1` each time. Add `.returning()` to get the rows themselves
+instead, as a list of models.
 
 ## 7. Load relations
 
@@ -226,7 +237,7 @@ if it raises:
 
 ```python
         async with db.transaction() as tx:
-            cy = await tx.first(insert(Author).values(name="Cy").returning())
+            [cy] = await tx.run(insert(Author).values(name="Cy"))
             await tx.run(insert(Post).values(author_id=cy.id, title="Draft"))
 
         try:
@@ -292,8 +303,8 @@ The second command finds no difference, so it writes nothing. Now use the
 column, inside `main()`:
 
 ```python
-        await db.run(update(Post).set(published=True).where(p.title == param("t")), t="Hello, world")
-        live = await db.run(select(Post).where(p.published == param("flag")), flag=True)
+        await db.run(update(Post).set(published=True).where(title="Hello, world"))
+        live = await db.run(select(Post).where(published=True))
         print([x.title for x in live])  # ['Hello, world']
 ```
 
@@ -315,7 +326,7 @@ from typing import Annotated, Optional
 
 import msgspec
 
-from korbase import FK, PK, Database, Default, KorbaseError, Rel, cols, delete, insert, param, select, table, update
+from korbase import FK, PK, Database, Default, KorbaseError, Rel, cols, delete, insert, select, table, update
 from korbase.migrate import apply, make
 
 
@@ -349,26 +360,24 @@ async def main() -> None:
         await db.run(delete(Author).all_rows())
 
         # Step 4: insert.
-        ada = await db.first(insert(Author).values(name="Ada").returning())
-        bob = await db.first(insert(Author).values(name="Bob").returning())
+        [ada] = await db.run(insert(Author).values(name="Ada"))
+        [bob] = await db.run(insert(Author).values(name="Bob"))
         await db.run(insert(Post).values(author_id=ada.id, title="Hello"))
         await db.run(insert(Post).values(author_id=ada.id, title="Second thoughts"))
         await db.run(insert(Post).values(author_id=bob.id, title="Bob's first"))
 
-        # Step 5: query with parameters.
-        found = await db.run(
-            select(Post).where(p.author_id == param("author")).order_by(p.title.asc()).limit(param("n")),
-            author=ada.id,
-            n=10,
-        )
+        # Step 5: query and filter.
+        found = await db.run(select(Post).where(author_id=ada.id).order_by(p.title.asc()).limit(10))
         print([x.title for x in found])
-        one = await db.first(select(Author).where(a.name == param("name")), name="Bob")
+        hello = await db.run(select(Post).where(p.title.like("H%"), author_id=ada.id))
+        print([x.title for x in hello])
+        one = await db.first(select(Author).where(name="Bob"))
         if one:
             print(one.name)
 
         # Step 6: update and delete.
-        print(await db.run(update(Post).set(title="Hello, world").where(p.title == param("old")), old="Hello"))
-        print(await db.run(delete(Post).where(p.title == "Second thoughts")))
+        print("updated", await db.run(update(Post).set(title="Hello, world").where(title="Hello")))
+        print("deleted", await db.run(delete(Post).where(title="Second thoughts")))
         try:
             await db.run(delete(Post))
         except KorbaseError as exc:
@@ -382,7 +391,7 @@ async def main() -> None:
 
         # Step 8: a transaction.
         async with db.transaction() as tx:
-            cy = await tx.first(insert(Author).values(name="Cy").returning())
+            [cy] = await tx.run(insert(Author).values(name="Cy"))
             await tx.run(insert(Post).values(author_id=cy.id, title="Draft"))
         try:
             async with db.transaction() as tx:
@@ -393,8 +402,8 @@ async def main() -> None:
         print(len(await db.run(select(Author))))
 
         # Step 9: use the new column.
-        await db.run(update(Post).set(published=True).where(p.title == param("t")), t="Hello, world")
-        live = await db.run(select(Post).where(p.published == param("flag")), flag=True)
+        await db.run(update(Post).set(published=True).where(title="Hello, world"))
+        live = await db.run(select(Post).where(published=True))
         print([x.title for x in live])
 
 
@@ -407,9 +416,10 @@ The first time, the output is:
 ```text
 applied 0001_create_blog_tables.sql
 ['Hello', 'Second thoughts']
+['Hello']
 Bob
-UPDATE 1
-DELETE 1
+updated 1
+deleted 1
 delete without where; call .all_rows() to confirm
 [('Hello, world', 'Ada'), ("Bob's first", 'Bob')]
 [('Ada', ['Hello, world']), ('Bob', ["Bob's first"])]
@@ -423,7 +433,7 @@ When you are done, `docker rm -f blog-pg` removes the database.
 ## What to read next
 
 - [Models](models.md): all the markers and the three model kinds.
-- [Queries](queries.md): filters, sorting, paging, upsert and raw SQL.
+- [Queries](queries.md): filters, sorting, paging, upsert and parameters.
 - [Relations](relations.md): how loading works, and its limits.
 - [Transactions](transactions.md): savepoints and raw SQL.
 - [Migrations](migrations.md): review markers, renames and the Python API.

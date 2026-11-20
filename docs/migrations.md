@@ -14,7 +14,7 @@ Once a file has been applied somewhere, never edit it. Other databases already r
 
 Four steps: `make`, review, `apply`, `status`.
 
-1. `make` compares your models with the `public` schema of the database and writes the SQL that closes the gap, as the next numbered file.
+1. `make` compares your models with the same-named tables of the `public` schema and writes the SQL that closes the gap, as the next numbered file. Other tables in `public` are left alone.
 2. You read the file. Dangerous statements carry a [`-- korbase:review`](glossary.md#review-marker) marker.
 3. `apply` runs the pending files in order and records each one.
 4. `status` lists every file as `applied`, `pending`, `changed` or `missing`.
@@ -66,12 +66,26 @@ ALTER TABLE "items" RENAME COLUMN "name" TO "title";
 
 Now `apply` runs it, and a new `make` prints `no changes`.
 
+## Local work with `dev`
+
+On your own machine, `make` then `apply` for every small change is slow. `dev` does both in one step:
+
+```sh
+python -m korbase.migrate dev --models models --dir migrations -m "add note"
+```
+
+It writes the next file, then applies it, and prints `applied migrations/0003_add_note.sql` (or `no changes`). If the new file holds a `-- korbase:review` line, `dev` applies nothing, prints the file name and the flagged lines, and exits with 1. Review the file as above, then run `apply`.
+
+Use `dev` only on a development database. It skips the step where a person reads the file before it runs, and it also applies any pending file that came before. For staging and production, run `make` on a development database, review and commit the file, then run `apply`.
+
 ## Command line
 
-- `--models` is the dotted path of a module that holds your `@table` classes. It must be importable from the current directory. `make` needs it.
+- `make`, `dev`, `apply` and `status` are the four commands.
+- `--models` is the dotted path of a module that holds your `@table` classes. It must be importable from the current directory. `make` and `dev` need it.
 - `--dir` is the migrations folder. It defaults to `migrations`.
 - `-m` names the new file. It defaults to `migration`.
-- `make` prints the new file's path, or `no changes`. `apply` prints one `applied NAME` line per file. `status` prints `STATE NAME` per file.
+- `--all-tables` is for `make`: compare the whole `public` schema, not only the tables of your models. See [Tables korbase does not manage](#going-further).
+- `make` prints the new file's path, or `no changes`. `dev` prints `applied PATH`, or `no changes`. `apply` prints one `applied NAME` line per file. `status` prints `STATE NAME` per file.
 - The exit code is 0 on success and 1 on error.
 
 ## Python API
@@ -81,7 +95,7 @@ import asyncio
 import os
 
 from korbase import Database
-from korbase.migrate import apply, collect_models, make, status
+from korbase.migrate import apply, collect_models, dev, make, status
 
 
 async def migrate(dsn: str) -> None:
@@ -92,11 +106,17 @@ async def migrate(dsn: str) -> None:
         print(await apply(db, "migrations"))  # ["0001_create_items.sql"]
 
 
+async def local(dsn: str) -> None:
+    async with await Database.connect(dsn) as db:
+        print(await dev(db, collect_models("models"), "migrations", "add note"))  # path, or None
+
+
 asyncio.run(migrate(os.environ["KORBASE_DSN"]))
 ```
 
 - `collect_models(module_path)` returns the `@table` classes of a module. It raises `KorbaseError` if there are none.
-- `make(db, models, directory, message)` returns the new file's path, or `None`.
+- `make(db, models, directory, message, all_tables=False)` returns the new file's path, or `None`. Pass `all_tables=True` to compare the whole `public` schema.
+- `dev(db, models, directory, message="dev")` makes then applies, and returns the new file's path or `None`. It raises `KorbaseError`, naming the file and the flagged lines, when the file needs review. Local use only.
 - `apply(db, directory)` returns the names of the files it ran.
 - `status(db, directory)` returns a list of `(name, state)` pairs.
 
@@ -127,13 +147,15 @@ The tests of this workflow are in `tests/test_migrate.py` and `tests/test_apply.
 
 ## Going further
 
-**How `make` works.** It does not change your data. In one transaction it creates a [scratch schema](glossary.md#scratch-schema), builds your models in it, reads that schema and `public`, writes the difference, and always [rolls back](glossary.md#rollback). So it needs the `CREATE` privilege on the database. Run it against a development database, not production. It compares with `public`: use the database whose schema should be brought up to date.
+**How `make` works.** It does not change your data. In one transaction it creates a [scratch schema](glossary.md#scratch-schema), builds your models in it, reads that schema and `public`, writes the difference, and always [rolls back](glossary.md#rollback). So it needs the `CREATE` privilege on the database. Run it against a development database, not production. It compares with `public`: use the database whose schema should be brought up to date. Only the tables your models name are compared, unless you pass `--all-tables`.
 
 **What the differ detects.** Tables created or dropped. Columns added or dropped, and changes of type, `NOT NULL`, default and identity. Primary keys, unique constraints, foreign keys (with `ON DELETE`) and indexes. Renames are not detected.
 
 **Ordering.** Statements are sorted so they can run. First: create tables, add columns, alter columns, change keys, add foreign keys, add indexes. Then the drops: foreign keys, indexes and constraints, columns, and tables last. A foreign key held up by a primary key change is dropped first and added back. Identical statements appear once.
 
-**Tables korbase does not manage.** Any table in `public` that is not in your models is a drop, flagged for review. An index that is not in your models is dropped the same way. Point `make` at a shared database and you will see other tools' tables as drops. Delete those lines, or use a database of your own. The `korbase_migrations` table is left out. Only ordinary and partitioned tables are read: views and other objects are not.
+**Tables korbase does not manage.** By default `make` looks only at the tables your models define. A table in `public` that no model names is ignored, so a shared database does not fill your files with drops of other tools' tables. Inside a table your models do define, an index that is not in your models is still dropped, flagged for review.
+
+The cost is that deleting a model no longer drops its table. To drop it, run `make --all-tables` (or `make(..., all_tables=True)`). That compares the whole `public` schema, so the file then holds a flagged `DROP TABLE` for the removed model and for every other table the models do not know. Keep the lines you want and delete the rest before you apply. `dev` has no such option: it never drops a removed model's table. The `korbase_migrations` table is always left out. Only ordinary and partitioned tables are read: views and other objects are not.
 
 **Review markers, and why each exists.**
 
