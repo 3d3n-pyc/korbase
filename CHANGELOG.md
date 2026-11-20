@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0a3
+
+Documentation release: no code change.
+
+### Changed
+
+- The docs, README, package description and agent skill present korbase as an ORM for Postgres and SQLite, and every install command uses `--pre` (only alphas are published).
+- Guide pages show what SQLite generates (`?n`, `LIKE`, `json_each`), its column types and how migrations behave without schemas.
+
 ## 0.1.0a2
 
 ### Added
