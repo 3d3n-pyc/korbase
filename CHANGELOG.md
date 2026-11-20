@@ -24,3 +24,10 @@
 - `.where(*conditions, **equals)` on `select`, `update` and `delete`: several conditions in one call, and `column=value` pairs, which accept a plain value or a `param`. A keyword set to `None` means `IS NULL`.
 - `python -m korbase.migrate dev` and `korbase.migrate.dev(db, models, directory, message)`: `make` then `apply` in one step, for local work. It stops and applies nothing when the new file holds a `-- korbase:review` line.
 - Typed results: `select`, `insert`, `upsert`, `update` and `delete` are generic over the model, so `run` is typed as `list[Model]` or `int`, and `first` as `Model | None`. `fetch` and `fetchrow` with `model=` are typed the same way.
+- `python -m korbase.stubs <models.module> -o <file>` generates a module with a typed `cols()`: `cols(Post).title` is a `Column[str]` and `cols(Post).titel` is a type error. At runtime it is the same object as `korbase.cols`. Rerun it after changing models; `--check` exits 1 if the file is out of date, for CI.
+- Column operators are typed: `like` and `ilike` only on `str` columns, and `<`, `==` and `in_()` take values of the column type. Keyword filters such as `.where(title=...)` are still checked at runtime only.
+- `@table` keeps the class type, so `run(select(Post))` is `list[Post]` for the type checker.
+
+### Changed (typing only)
+
+- Comparing a typed column with a value of another type, such as `Column[int] == "3"`, is now a type error. Nothing changes at runtime. To update: fix the value or the column, or add `# type: ignore` where it is on purpose.
