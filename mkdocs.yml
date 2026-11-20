@@ -1,0 +1,97 @@
+site_name: korbase
+site_description: An async ORM for Postgres, built the Korvex way.
+site_url: https://3d3n-pyc.github.io/korbase/
+repo_url: https://github.com/3d3n-pyc/korbase
+repo_name: 3d3n-pyc/korbase
+edit_uri: edit/main/docs/
+copyright: MIT License
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.instant
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      toggle: {icon: material/weather-night, name: Dark mode}
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      toggle: {icon: material/weather-sunny, name: Light mode}
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc: {permalink: true}
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_root_heading: true
+            show_root_full_path: false
+            show_bases: false
+            inherited_members: true
+            show_source: false
+            members_order: source
+            filters: ["!^_"]
+            merge_init_into_class: true
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+            docstring_style: null
+  - llmstxt:
+      markdown_description: >
+        korbase is an async ORM for Postgres, built the Korvex way: models are
+        msgspec Structs, dataclasses or TypedDicts; queries compile once to SQL
+        with $n parameters; migrations are reviewed SQL files. Driver: asyncpg.
+        Python 3.10 to 3.14. Pre-alpha: install with `pip install korbase[asyncpg]`;
+        the API may still change.
+      full_output: llms-full.txt
+      sections:
+        Start:
+          - index.md: What korbase is, and a first app
+          - tutorial.md: Your first table and queries, step by step, for beginners
+          - glossary.md: Plain-words definitions of the terms used in the guide
+        Guide:
+          - models.md: Tables as msgspec Structs, dataclasses or TypedDicts, keys, defaults, indexes
+          - queries.md: select, insert, update, delete, upsert, and how they compile to SQL
+          - relations.md: Foreign keys, relations and how to load them
+          - transactions.md: Transactions, and raw SQL with parameters
+          - migrations.md: Reviewed SQL migration files, make and apply
+          - korvex.md: Plugging korbase into a Korvex app
+          - testing.md: Testing against a real Postgres database
+        Reference:
+          - reference/*.md
+        Optional:
+          - ai.md: llms.txt, the agent skill, AGENTS.md
+
+nav:
+  - Home: index.md
+  - Tutorial: tutorial.md
+  - Guide:
+      - Models: models.md
+      - Queries: queries.md
+      - Relations: relations.md
+      - Transactions and raw SQL: transactions.md
+      - Migrations: migrations.md
+      - Korvex integration: korvex.md
+      - Testing: testing.md
+  - Glossary: glossary.md
+  - Reference:
+      - korbase: reference/korbase.md
+      - korbase.migrate: reference/migrate.md
+      - korbase.korvex: reference/korvex.md
+  - AI: ai.md
+  - More:
+      - Changelog: https://github.com/3d3n-pyc/korbase/blob/main/CHANGELOG.md

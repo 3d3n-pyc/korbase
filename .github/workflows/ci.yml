@@ -60,3 +60,17 @@ jobs:
       # turns the GIL back on, which would undo the point.
       - name: Tests
         run: uv run --no-sync pytest ${{ endsWith(matrix.python, 't') && '-W error::RuntimeWarning' || '' }}
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+
+      # Builds the site with strict checks; the repo is private, so nothing is deployed.
+      - name: Build the docs
+        run: uv run --group docs mkdocs build --strict -d site

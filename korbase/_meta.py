@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import dataclasses
+import math
+import re
 import sys
 import types
 import typing
@@ -17,6 +19,8 @@ __all__ = [
     "FK",
     "Unique",
     "Default",
+    "SqlType",
+    "constraint_name",
     "Index",
     "Rel",
     "ColumnMeta",
@@ -27,26 +31,59 @@ __all__ = [
 ]
 
 _ATTR = "__korbase_table__"
+_SQL_TYPE = re.compile(r"[a-z][a-z0-9_ ]*(\(\d+(,\s*\d+)?\))?(\[\])?")
+_ON_DELETE = ("cascade", "restrict", "set null", "set default", "no action")
+_UNSET: Any = object()
 
 
 @dataclass(frozen=True)
 class PK:
-    """Marks a field as (part of) the primary key."""
+    """Marks a field as (part of) the primary key.
+
+    `identity=None` (the default) makes a single integer key an identity
+    column. `True` forces it and `False` turns it off. `True` is only valid
+    on a single integer key.
+    """
+
+    identity: bool | None = None
+
+
+@dataclass(frozen=True)
+class SqlType:
+    """Overrides the SQL type of a column, for example `SqlType("varchar(80)")`.
+
+    The type must be lowercase, such as `numeric(10, 2)`, `text[]` or
+    `double precision`. Anything else raises `KorbaseError`.
+    """
+
+    sql: str
+
+    def __post_init__(self) -> None:
+        """Check that the type is a plain lowercase SQL type."""
+        if not isinstance(self.sql, str) or _SQL_TYPE.fullmatch(self.sql) is None:
+            raise KorbaseError(f"invalid SQL type: {self.sql!r}")
 
 
 @dataclass(frozen=True)
 class FK:
-    """Marks a field as a foreign key to `"table.column"`."""
+    """Marks a field as a foreign key to `"table.column"`.
+
+    `on_delete` is one of `"cascade"`, `"restrict"`, `"set null"`,
+    `"set default"` and `"no action"` (the default).
+    """
 
     target: str
+    on_delete: Literal["cascade", "restrict", "set null", "set default", "no action"] = "no action"
 
     def __post_init__(self) -> None:
-        """Check that the target is two valid identifiers."""
+        """Check that the target is two valid identifiers and on_delete is known."""
         parts = self.target.split(".") if isinstance(self.target, str) else []
         if len(parts) != 2:
             raise KorbaseError(f"FK target must be 'table.column': {self.target!r}")
         for part in parts:
             validate_ident(part)
+        if self.on_delete not in _ON_DELETE:
+            raise KorbaseError(f"invalid FK on_delete: {self.on_delete!r}")
 
 
 @dataclass(frozen=True)
@@ -56,9 +93,36 @@ class Unique:
 
 @dataclass(frozen=True)
 class Default:
-    """Stores a column default, used later by migrations."""
+    """Stores a column default, used by migrations.
 
-    value: Any = None
+    Give a literal `value` (None, bool, finite int or float, or str) or a raw
+    `sql` expression, not both. `sql` is written as is into the migration, so
+    it must come from trusted code, never from user input. With neither, the
+    default is NULL.
+    """
+
+    value: Any = _UNSET
+    sql: str | None = dataclasses.field(default=None, kw_only=True)
+
+    def __post_init__(self) -> None:
+        """Check that exactly one of `value` and `sql` is set and valid."""
+        if self.value is _UNSET:
+            object.__setattr__(self, "value", None if self.sql is None else _UNSET)
+        elif self.sql is not None:
+            raise KorbaseError("Default takes a value or sql, not both")
+        if self.sql is not None and not isinstance(self.sql, str):
+            raise KorbaseError("Default sql must be a string")
+        if self.sql is None and not _literal_ok(self.value):
+            raise KorbaseError(f"unsupported Default value: {self.value!r}")
+
+
+def _literal_ok(value: Any) -> bool:
+    """Return True if `value` can be a literal column default."""
+    if value is None or isinstance(value, (bool, str)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return isinstance(value, int)
 
 
 @dataclass(frozen=True)
@@ -94,6 +158,8 @@ class ColumnMeta:
     fk: FK | None
     unique: bool
     default: Default | None
+    sql_type: str | None = None
+    identity: bool = False
 
 
 @dataclass(frozen=True)
@@ -199,6 +265,9 @@ def _column(name: str, tp: Any, nullable: bool, marks: tuple[Any, ...]) -> Colum
     """Build a `ColumnMeta` from a field's type and markers."""
     fks = [m for m in marks if isinstance(m, FK)]
     defaults = [m for m in marks if isinstance(m, Default)]
+    sql_types = [m for m in marks if isinstance(m, SqlType)]
+    if fks and fks[0].on_delete == "set null" and not nullable:
+        raise KorbaseError(f"column {name!r}: 'set null' needs a nullable column")
     return ColumnMeta(
         name=validate_ident(name),
         python_type=tp,
@@ -207,7 +276,22 @@ def _column(name: str, tp: Any, nullable: bool, marks: tuple[Any, ...]) -> Colum
         fk=fks[0] if fks else None,
         unique=any(isinstance(m, Unique) for m in marks),
         default=defaults[0] if defaults else None,
+        sql_type=sql_types[0].sql if sql_types else None,
     )
+
+
+def _resolve_identity(columns: list[ColumnMeta], raw: dict[str, bool | None]) -> list[ColumnMeta]:
+    """Resolve each PK's identity flag; reject identity on non-integer or composite keys."""
+    single = sum(c.pk for c in columns) == 1
+    out = []
+    for col in columns:
+        wanted = raw.get(col.name)
+        int_key = col.pk and single and col.python_type is int
+        if wanted is True and not int_key:
+            raise KorbaseError(f"PK(identity=True) needs a single integer key: {col.name!r}")
+        flag = bool(int_key and col.sql_type is None) if wanted is None else bool(wanted)
+        out.append(dataclasses.replace(col, identity=flag))
+    return out
 
 
 def _build(model: type, names: list[str]) -> tuple[list[ColumnMeta], list[RelMeta]]:
@@ -224,6 +308,40 @@ def _build(model: type, names: list[str]) -> tuple[list[ColumnMeta], list[RelMet
         else:
             columns.append(_column(name, tp, nullable, marks))
     return columns, relations
+
+
+def _raw_identity(model: type, names: list[str]) -> dict[str, bool | None]:
+    """Return the `identity` value of each field's PK marker."""
+    hints = _hints(model)
+    raw: dict[str, bool | None] = {}
+    for name in names:
+        for mark in _split(hints[name])[1]:
+            if isinstance(mark, PK):
+                raw[name] = mark.identity
+    return raw
+
+
+def constraint_name(table: str, kind: str, cols: tuple[str, ...] | list[str] = ()) -> str:
+    """Return the fixed name of a constraint or index.
+
+    `kind` is `pkey`, `fkey`, `key` or `idx`. Raises `KorbaseError` if the
+    name is longer than 63 bytes.
+    """
+    name = f"{table}_pkey" if kind == "pkey" else f"{table}_{'_'.join(cols)}_{kind}"
+    return validate_ident(name)
+
+
+def _check_names(table_name: str, columns: list[ColumnMeta], indexes: tuple[Index, ...]) -> None:
+    """Raise `KorbaseError` if a name this table would produce is too long."""
+    constraint_name(table_name, "pkey")
+    for col in columns:
+        if col.fk is not None:
+            constraint_name(table_name, "fkey", (col.name,))
+        if col.unique:
+            constraint_name(table_name, "key", (col.name,))
+    for index in indexes:
+        if index.name is None:
+            constraint_name(table_name, "idx", index.columns)
 
 
 def _check(
@@ -247,6 +365,7 @@ def _check(
                 raise KorbaseError(f"Index uses unknown column {col!r}")
         if index.name is not None:
             validate_ident(index.name)
+    _check_names(table_name, columns, indexes)
 
 
 def table(name: str, *, indexes: tuple[Index, ...] = ()) -> Callable[[type], type]:
@@ -264,6 +383,7 @@ def table(name: str, *, indexes: tuple[Index, ...] = ()) -> Callable[[type], typ
         kind, names = _kind_and_names(model)
         columns, relations = _build(model, names)
         _check(name, columns, relations, indexes)
+        columns = _resolve_identity(columns, _raw_identity(model, names))
         pk = tuple(c.name for c in columns if c.pk)
         meta = TableMeta(name, model, kind, tuple(columns), pk, tuple(relations), indexes)  # type: ignore[arg-type]
         setattr(model, _ATTR, meta)

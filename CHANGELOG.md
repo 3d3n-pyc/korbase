@@ -8,3 +8,6 @@
 - `Database` and `Transaction` with `run`, `first`, `fetch`, `fetchrow`, `execute` and `transaction()` (a nested transaction is a savepoint). The asyncpg backend is installed with `korbase[asyncpg]`.
 - `.load(...)` for one-to-many and many-to-one relations, one extra query per relation.
 - Korvex integration: `korbase.korvex.install(app, dsn)`, with `Depends(kdb.database)` and `Depends(kdb.transaction)`.
+- Migrations: `python -m korbase.migrate make|apply|status` and `korbase.migrate.make/apply/status/create_all`. `make` diffs the models against the live schema and writes a numbered SQL file to review; risky statements carry `-- korbase:review`, which `apply` refuses until removed. `apply` checks checksums and order, takes an advisory lock and runs each file in its own transaction.
+- New markers for migrations: `SqlType`, `PK(identity=...)`, `FK(..., on_delete=...)`, `Default(sql=...)`.
+- Documentation site (MkDocs): tutorial, guide, glossary, API reference, and an agent skill shipped in the package.

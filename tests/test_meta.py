@@ -14,7 +14,9 @@ from korbase._meta import (
     Default,
     Index,
     Rel,
+    SqlType,
     Unique,
+    constraint_name,
     table,
     table_meta,
 )
@@ -167,3 +169,133 @@ def test_ident_bad(name: str) -> None:
         validate_ident(name)
     with pytest.raises(KorbaseError):
         quote_ident(name)
+
+
+@pytest.mark.parametrize("sql", ["varchar(80)", "numeric(10, 2)", "text[]", "double precision"])
+def test_sqltype_valid(sql):
+    assert SqlType(sql).sql == sql
+
+
+@pytest.mark.parametrize("sql", ["Text", "text; drop", "", "varchar(x)", "text\n", 5])
+def test_sqltype_invalid(sql):
+    with pytest.raises(KorbaseError):
+        SqlType(sql)
+
+
+def test_sqltype_on_column():
+    @table("st")
+    @dataclasses.dataclass
+    class M:
+        id: Annotated[int, PK()]
+        n: Annotated[str, SqlType("varchar(80)")]
+
+    assert table_meta(M).columns[1].sql_type == "varchar(80)"
+    assert table_meta(M).columns[0].sql_type is None
+
+
+def test_identity_automatic_and_explicit():
+    @table("ia")
+    @dataclasses.dataclass
+    class A:
+        id: Annotated[int, PK()]
+
+    @table("ib")
+    @dataclasses.dataclass
+    class B:
+        id: Annotated[int, PK(identity=False)]
+
+    @table("ic")
+    @dataclasses.dataclass
+    class C:
+        id: Annotated[str, PK()]
+
+    assert table_meta(A).columns[0].identity is True
+    assert table_meta(B).columns[0].identity is False
+    assert table_meta(C).columns[0].identity is False
+
+
+def test_identity_true_invalid():
+    with pytest.raises(KorbaseError):
+
+        @table("ie")
+        @dataclasses.dataclass
+        class D:
+            id: Annotated[str, PK(identity=True)]
+
+    with pytest.raises(KorbaseError):
+
+        @table("if_")
+        @dataclasses.dataclass
+        class E:
+            a: Annotated[int, PK(identity=True)]
+            b: Annotated[int, PK()]
+
+
+def test_composite_pk_not_identity():
+    @table("comp")
+    @dataclasses.dataclass
+    class F:
+        a: Annotated[int, PK()]
+        b: Annotated[int, PK()]
+
+    assert not any(c.identity for c in table_meta(F).columns)
+
+
+def test_fk_on_delete():
+    assert FK("a.b").on_delete == "no action"
+    assert FK("a.b", "cascade").on_delete == "cascade"
+    with pytest.raises(KorbaseError):
+        FK("a.b", "boom")  # type: ignore[arg-type]
+
+
+def test_fk_set_null_needs_nullable():
+    with pytest.raises(KorbaseError):
+
+        @table("sn")
+        @dataclasses.dataclass
+        class G:
+            id: Annotated[int, PK()]
+            u: Annotated[int, FK("users.id", "set null")]
+
+    @table("sn2")
+    @dataclasses.dataclass
+    class H:
+        id: Annotated[int, PK()]
+        u: Annotated[Optional[int], FK("users.id", "set null")] = None
+
+
+def test_default_rules():
+    assert Default(3).value == 3 and Default(None).value is None
+    assert Default(sql="now()").sql == "now()"
+    assert Default("x").value == "x" and Default(True).value is True
+    with pytest.raises(KorbaseError):
+        Default(1, sql="now()")
+    for bad in (float("nan"), float("inf"), [1], {}, object()):
+        with pytest.raises(KorbaseError):
+            Default(bad)
+
+
+def test_constraint_name():
+    assert constraint_name("t", "pkey", ["id"]) == "t_pkey"
+    assert constraint_name("t", "fkey", ["a", "b"]) == "t_a_b_fkey"
+    assert constraint_name("t", "key", ["a"]) == "t_a_key"
+    assert constraint_name("t", "idx", ["a", "b"]) == "t_a_b_idx"
+    with pytest.raises(KorbaseError):
+        constraint_name("t" * 60, "idx", ["abcd"])
+
+
+def test_long_generated_names_rejected():
+    with pytest.raises(KorbaseError):
+
+        @table("t" * 40)
+        @dataclasses.dataclass
+        class L:
+            id: Annotated[int, PK()]
+            ccccccccccccccccccccccccc: Annotated[str, Unique()]
+
+    with pytest.raises(KorbaseError):
+
+        @table("lx", indexes=(Index("id", name="x" * 64),))
+        @dataclasses.dataclass
+        class M2:
+            id: Annotated[int, PK()]
