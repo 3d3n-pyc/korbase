@@ -310,3 +310,22 @@ def test_sqlite_constraints_by_columns():
     assert 'SQLite cannot alter the primary key on "a"' in out
     out = lite(snap(BASE), snap(des))
     assert 'SQLite cannot alter a unique constraint on "a"' in out and "add unique" in out
+
+
+def _part(where: str | None, unique: bool = False) -> Table:
+    """Build a table with one index, partial when `where` is given."""
+    return tbl("a", (ID, col("x")), indexes=(Index("a_x_idx", ("x",), unique, where),))
+
+
+def test_partial_index():
+    want = 'CREATE UNIQUE INDEX "a_x_idx" ON "a" ("x") WHERE x > 0;\n'
+    assert sql_of(snap(BASE), snap(_part("x > 0", True))) == want
+    assert lite(snap(BASE), snap(_part("x > 0", True))) == want
+    assert sql_of(snap(_part("(x  > 0)")), snap(_part("x > 0"))) == ""
+    changed = sql_of(snap(_part("x > 0")), snap(_part("x > 1")))
+    assert changed == 'DROP INDEX "a_x_idx";\nCREATE INDEX "a_x_idx" ON "a" ("x") WHERE x > 1;\n'
+    assert sql_of(snap(_part(None)), snap(_part("x > 0"))).startswith('DROP INDEX "a_x_idx";\nCREATE INDEX')
+    assert (
+        sql_of(snap(_part("x > 0")), snap(_part(None)))
+        == 'DROP INDEX "a_x_idx";\nCREATE INDEX "a_x_idx" ON "a" ("x");\n'
+    )

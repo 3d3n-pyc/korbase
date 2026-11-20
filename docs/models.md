@@ -58,7 +58,7 @@ dataclass, put `@table` above `@dataclass`. Any other class raises
 | `Default(value)` or `Default(sql=...)` | a field | The column default. |
 | `SqlType("...")` | a field | Overrides the SQL type. |
 | `Rel("field")` | a field | A relation, not a column. See [Relations](relations.md). |
-| `Index(*columns, unique=False, name=None)` | `table(..., indexes=(...))` | An [index](glossary.md#index) over one or more columns. It makes lookups on them faster. |
+| `Index(*columns, unique=False, name=None, where=None)` | `table(..., indexes=(...))` | An [index](glossary.md#index) over one or more columns. It makes lookups on them faster. `where` makes it a partial index. |
 
 ### Primary keys
 
@@ -85,6 +85,41 @@ The target must be exactly `"table.column"`, with valid names.
 - `Default(sql="now()")` is written into the migration as is. Use it only
   with SQL from trusted code, never from user input.
 - Give a value or `sql`, not both. A bare `Default()` means `DEFAULT NULL`.
+
+### Indexes
+
+An index makes lookups on its columns faster, and costs some space and extra
+work on each write. Declare indexes in `table(..., indexes=(...))`.
+
+A partial index covers only the rows that match a condition, given as `where`.
+It is smaller than a full index on the same columns, so it costs less to keep.
+Postgres and SQLite both support it:
+
+```python
+import dataclasses
+import datetime
+from typing import Annotated, Optional
+
+from korbase import PK, Index, table
+
+
+@table("tasks", indexes=(Index("due", name="tasks_by_due", where="due IS NOT NULL"),))
+@dataclasses.dataclass
+class Task:
+    id: Annotated[int, PK()]
+    due: Optional[datetime.date] = None
+```
+
+Here the index holds only the tasks that have a due date. A query needs to
+repeat the condition, such as `WHERE due IS NOT NULL`, for the database to use it.
+
+- `where` is a SQL predicate written as is after `WHERE`. It must come from
+  trusted code, never from user input, in the same way as `Default(sql=...)`.
+  Korbase only rejects an empty predicate, or one with a `;` or a NUL byte.
+- Changing `where` is a change of the index: `make` drops the index and creates
+  it again with the new predicate.
+- The generated name ignores `where`. Two indexes on the same columns get the
+  same name, and the database rejects the second one. Give one of them `name=`.
 
 ### Nullability
 
