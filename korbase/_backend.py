@@ -35,6 +35,15 @@ class Conn(Protocol):
         """Run `sql` and build the first row, or return `None` if empty."""
         ...
 
+    def fetch_columns(
+        self, sql: str, args: Sequence[object]
+    ) -> Awaitable[tuple[Sequence[str], list[Sequence[object]]]]:
+        """Run `sql` and return the column names (in `SELECT` order) with the rows.
+
+        The names are known even when there are no rows.
+        """
+        ...
+
     def execute(self, sql: str, args: Sequence[object]) -> Awaitable[str]:
         """Run `sql` and return the driver's status tag, such as `INSERT 0 1`."""
         ...

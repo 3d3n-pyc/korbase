@@ -1,43 +1,26 @@
 # korbase
 
-An async ORM for Postgres, built the Korvex way. It is pure Python.
-
-korbase is pre-alpha. The API may still change, and there are no
-migrations yet.
-
-- **Models** are msgspec Structs, dataclasses or TypedDicts.
-- **Driver**: asyncpg, installed with the `asyncpg` extra. A korpg driver is planned.
-- **Korvex**: optional integration, installed with the `korvex` extra.
-- **Python**: 3.10 and later.
-
-## Install
-
-```sh
-pip install korbase[asyncpg]
-```
+An async ORM for Postgres, built the Korvex way. It is pure Python. Pre-alpha: the API may change, and there are no migrations yet. Models are msgspec Structs, dataclasses or TypedDicts. Driver: asyncpg. Python 3.10 and later. Install with `pip install korbase[asyncpg]`.
 
 ## Example
 
-This example drops and recreates two tables, so run it on a scratch
-database. Replace the DSN with your own.
+It creates two tables in plain SQL, so run it on a scratch database and replace the DSN.
 
 ```python
+from __future__ import annotations
 import asyncio
 from typing import Annotated, Optional
 
 import msgspec
-
 from korbase import FK, PK, Database, Rel, cols, delete, insert, param, select, table, update
 
 DSN = "postgresql://user:password@localhost:5432/scratch"
-
 
 @table("users")
 class User(msgspec.Struct):
     id: Annotated[int, PK()]
     name: str
     posts: Annotated[list[Post], Rel("author_id")] = msgspec.field(default_factory=list)
-
 
 @table("posts")
 class Post(msgspec.Struct):
@@ -46,19 +29,13 @@ class Post(msgspec.Struct):
     title: str
     author: Annotated[Optional[User], Rel("author_id")] = None
 
-
 async def main() -> None:
     async with await Database.connect(DSN) as db:
-        # Korbase does not create tables yet, so the schema is plain SQL.
         await db.execute(
             """
             DROP TABLE IF EXISTS posts; DROP TABLE IF EXISTS users;
             CREATE TABLE users (id int PRIMARY KEY, name text NOT NULL);
-            CREATE TABLE posts (
-                id int PRIMARY KEY,
-                author_id int NOT NULL REFERENCES users(id),
-                title text NOT NULL
-            );
+            CREATE TABLE posts (id int PRIMARY KEY, author_id int NOT NULL REFERENCES users(id), title text NOT NULL);
             """
         )
         u, p = cols(User), cols(Post)
@@ -97,64 +74,35 @@ async def main() -> None:
         rows = await db.fetch("SELECT id, name FROM users WHERE id = $1", 1, model=User)
         print(rows)  # [User(id=1, name='Ada', posts=[])]
 
-
 asyncio.run(main())
 ```
 
-## Models
+## Models and queries
 
-- `msgspec.Struct`, `dataclass` and `TypedDict` all work the same way.
-  A `TypedDict` row comes back as a `dict`.
-- Put `PK()`, `FK("table.column")`, `Unique()` or `Default(...)` inside
-  `Annotated[...]`. Indexes go in `@table("name", indexes=(Index("col"),))`.
-  Every table needs a primary key.
-- A relation is a field marked `Rel("fk_field")`. A `list[Model]` relation is
-  one-to-many. A single model relation is many-to-one.
-- Declare relation fields after the columns. A dataclass with a relation
-  between two columns cannot be read back without validation.
-- `Database.connect(dsn, validate=True)` checks every row against its model
-  with msgspec. It is off by default, and it adds work per row.
-
-## Queries
-
-- `select(Model)`, `insert(Model)`, `update(Model)`, `delete(Model)` and
-  `upsert(Model)` build a query. Run it with `db.run(query, **params)`.
-- `select` returns a list of models. `insert` and `upsert` return a list when
-  you add `.returning()`. Other writes return the command tag, such as `"UPDATE 1"`.
-- `update` and `delete` need a `.where(...)`, or `.all_rows()` to confirm.
-- `db.first(query, **params)` returns one model or `None`.
-- `db.fetch`, `db.fetchrow` and `db.execute` run raw SQL with `$1, $2` arguments.
-- A transaction inside a transaction is a savepoint.
+- `PK()`, `FK("table.column")`, `Unique()` and `Default(...)` go inside `Annotated[...]`. Every table needs a primary key.
+- `Rel("fk_field")` marks a relation. `list[Model]` is one-to-many, a single model is many-to-one. Declare relation fields after the columns.
+- `select`, `insert`, `update`, `delete` and `upsert` build a query. `db.run(query, **params)` runs it. `insert` and `upsert` return rows with `.returning()`. Other writes return the command tag, such as `"UPDATE 1"`. `db.first(query, **params)` returns one model or `None`.
+- `db.fetch`, `db.fetchrow` and `db.execute` take raw SQL with `$1, $2` arguments. A transaction inside a transaction is a savepoint.
+- `col == None` compiles to `IS NULL`. Prefer `.is_null()`. `Database.connect(dsn, validate=True)` checks each row with msgspec; it is off by default.
 
 ## How SQL stays safe
 
-- Table and column names must match `[A-Za-z_][A-Za-z0-9_]{0,62}`. They are
-  double-quoted. Anything else raises `KorbaseError`.
-- Every value, including `limit` and `offset`, is sent as a `$n` placeholder.
-  No value is written into the SQL text.
-- Column names in `insert`, `update` and `upsert` must be columns of the model.
-- Raw SQL is not checked. Only its values are sent as arguments.
+Table and column names must match `[A-Za-z_][A-Za-z0-9_]{0,62}`. They are double-quoted, and anything else raises `KorbaseError`. Columns in `insert`, `update` and `upsert` must belong to the model. Every value, including `limit` and `offset`, is a `$n` placeholder, never written into the SQL text. `update` and `delete` need `.where(...)`, or `.all_rows()` to confirm. Raw SQL is not checked, only its values are sent as arguments.
 
 ## Korvex
 
-`korbase.korvex.install` opens the pool when the app starts and closes it when
-the app stops. Handlers get the database or a per-request transaction through
-`Depends`. A transaction commits unless the handler raises.
+`korbase.korvex.install` opens the pool when the app starts and closes it when the app stops. Handlers get the database or a per-request transaction through `Depends`, and a transaction commits unless the handler raises. Install with `pip install korbase[korvex]`.
 
 ```python
 from __future__ import annotations
-
 from typing import Annotated
 
 from korvex import App, Depends, Response
-
 from korbase import Database, cols, select
 from korbase.korvex import install
-
 # DSN and User come from the example above.
 app = App()
 kdb = install(app, DSN)  # module level: the handler annotations need it
-
 
 @app.get("/users")
 async def list_users(db: Annotated[Database, Depends(kdb.database)]) -> Response:
@@ -162,28 +110,11 @@ async def list_users(db: Annotated[Database, Depends(kdb.database)]) -> Response
     return Response.json([x.name for x in users])
 ```
 
-Install with `pip install korbase[korvex]`.
-
 ## Not there yet
 
-- Migrations and `create_all`. `Unique`, `Default` and `Index` are recorded
-  on the model, but nothing uses them yet.
-- SQLite.
-- Joins in the query builder.
-- The korpg driver. The `korpg` extra is empty.
-- Relations on composite primary keys. `.load(...)` raises `KorbaseError`.
+- Migrations and `create_all`. `Unique`, `Default` and `Index` are recorded on the model, but nothing uses them yet. `Index` goes in `@table("name", indexes=(Index("col"),))`.
+- SQLite, joins in the query builder, and the korpg driver (its extra is empty). Relations on composite primary keys: `.load(...)` raises `KorbaseError`.
 
 ## Tests
 
-Tests need a Postgres server. `tests/pg/start.sh` starts one in Docker on
-port 55433 and prints the DSN:
-
-```sh
-eval "$(bash tests/pg/start.sh | grep '^export')"
-uv run pytest
-```
-
-## Contributing
-
-See [AGENTS.md](AGENTS.md) for the rules and the checks CI runs. Every
-change is listed in [CHANGELOG.md](CHANGELOG.md).
+`eval "$(bash tests/pg/start.sh | grep '^export')"` starts Postgres in Docker on port 55433, then `uv run pytest`. Rules: [AGENTS.md](AGENTS.md). Changes: [CHANGELOG.md](CHANGELOG.md).

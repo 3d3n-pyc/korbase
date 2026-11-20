@@ -28,6 +28,12 @@ class _AsyncpgConn:
         record = await self._conn.fetchrow(sql, *args)
         return None if record is None else builder(record)
 
+    async def fetch_columns(self, sql: str, args: Sequence[object]) -> tuple[Sequence[str], list[Sequence[object]]]:
+        """Run `sql` through a prepared statement; return column names and records."""
+        stmt = await self._conn.prepare(sql)
+        names = [a.name for a in stmt.get_attributes()]
+        return names, list(await stmt.fetch(*args))
+
     async def execute(self, sql: str, args: Sequence[object]) -> str:
         """Run `sql` and return the status tag."""
         return await self._conn.execute(sql, *args)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, Optional
 
@@ -35,25 +35,15 @@ def _row_builder(query: _Query, validate: bool) -> Any:
     return positional_builder(query._meta)
 
 
-def _by_name(model: type, validate: bool = False) -> Any:
-    """Return a builder that maps a driver record to `model` by column name."""
-    if validate:
-        return _validating_by_name(model)
-
-    def build(row: Any) -> Any:
-        """Build one model from a record that knows its column names."""
-        return named_builder(model, tuple(row.keys()))(row)
-
-    return build
-
-
-def _validating_by_name(model: type) -> Any:
-    """Return a builder that validates a record against `model` by column name."""
+def _by_name(model: type, names: Sequence[str], validate: bool) -> Any:
+    """Return a builder that maps a row with column `names` to `model`."""
+    if not validate:
+        return named_builder(model, tuple(names))
     import msgspec
 
-    def build(row: Any) -> Any:
-        """Validate one record and build the model."""
-        data = dict(zip(row.keys(), row, strict=True))
+    def build(row: Sequence[Any]) -> Any:
+        """Validate one row and build the model."""
+        data = dict(zip(names, row, strict=True))
         return msgspec.convert(data, model, from_attributes=True)
 
     return build
@@ -100,15 +90,21 @@ class _Runner:
 
     async def fetch(self, sql: str, *args: Any, model: Optional[type] = None) -> list[Any]:
         """Run raw SQL; rows become `model` (by column name) or tuples."""
-        builder = tuple if model is None else _by_name(model, self._validate)
         async with self._conn() as conn:
-            return await conn.fetch(sql, args, builder)
+            if model is None:
+                return await conn.fetch(sql, args, tuple)
+            names, rows = await conn.fetch_columns(sql, args)
+        build = _by_name(model, names, self._validate)
+        return [build(r) for r in rows]
 
     async def fetchrow(self, sql: str, *args: Any, model: Optional[type] = None) -> Any:
         """Run raw SQL and return the first row, or `None`."""
-        builder = tuple if model is None else _by_name(model, self._validate)
         async with self._conn() as conn:
-            return await conn.fetchrow(sql, args, builder)
+            if model is None:
+                return await conn.fetchrow(sql, args, tuple)
+            names, rows = await conn.fetch_columns(sql, args)
+        build = _by_name(model, names, self._validate)
+        return build(rows[0]) if rows else None
 
     async def execute(self, sql: str, *args: Any) -> str:
         """Run raw SQL and return the command tag."""

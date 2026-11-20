@@ -199,6 +199,16 @@ def test_validate_raw_model(dsn: str) -> None:
     with_db(body, dsn, validate=True)
 
 
+def test_raw_model_on_empty_result(dsn: str) -> None:
+    async def body(db: Database) -> None:
+        assert await db.fetch("SELECT * FROM users", model=UserDC) == []
+        assert await db.fetchrow("SELECT * FROM users", model=UserDC) is None
+        with pytest.raises(KorbaseError):
+            await db.fetch("SELECT id FROM users", model=UserDC)
+
+    with_db(body, dsn)
+
+
 def test_param_named_query_or_self(dsn: str) -> None:
     async def body(db: Database) -> None:
         await db.execute("INSERT INTO users VALUES (1, 'abc')")
