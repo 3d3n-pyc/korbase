@@ -4,7 +4,7 @@
 
 ## The idea
 
-A test should not need a fake database. korbase tests run against a real Postgres, so you test what really happens. Two tricks keep this fast and clean. The tables are created once for the whole run. Each test then works inside a [transaction](glossary.md#transaction) that is [rolled back](glossary.md#rollback) at the end, so the next test starts with no leftover data.
+A test should not need a fake database. korbase tests run against a real database, so you test what really happens. For fast tests with no Docker, use SQLite: `sqlite::memory:` (or a file in pytest's `tmp_path`) gives each test its own empty database, and the same `create_all(db, models)` call works (see [SQLite](sqlite.md#going-further)). Use Postgres when you need its behaviour: its richer types, `ILIKE` on non-ASCII text, many writers at once. This page uses Postgres. Two tricks keep this fast and clean. The tables are created once for the whole run. Each test then works inside a [transaction](glossary.md#transaction) that is [rolled back](glossary.md#rollback) at the end, so the next test starts with no leftover data.
 
 ## A disposable Postgres
 

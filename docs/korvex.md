@@ -1,6 +1,6 @@
 # Korvex
 
-**Use this when** you build a web app with Korvex and want a database in your handlers, with one transaction per request. Install it with `pip install korbase[korvex]`.
+**Use this when** you build a web app with Korvex and want a database in your handlers, with one transaction per request. Install it with `pip install --pre "korbase[korvex]"`.
 
 ## The idea
 

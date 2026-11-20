@@ -1,4 +1,4 @@
-"""Async ORM for Postgres, built the Korvex way.
+"""Async ORM for Postgres and SQLite, built the Korvex way.
 
 @table("users")
 class User(msgspec.Struct):

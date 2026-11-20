@@ -14,7 +14,7 @@ Once a file has been applied somewhere, never edit it. Other databases already r
 
 Four steps: `make`, review, `apply`, `status`.
 
-1. `make` compares your models with the same-named tables of the `public` schema and writes the SQL that closes the gap, as the next numbered file. Other tables in `public` are left alone.
+1. `make` compares your models with the same-named tables of the `public` schema and writes the SQL that closes the gap, as the next numbered file. Other tables in `public` are left alone. (`public` is Postgres. A SQLite database is one file with no schemas, so `make` compares with that file. See [SQLite](sqlite.md#migrations-on-sqlite).)
 2. You read the file. Dangerous statements carry a [`-- korbase:review`](glossary.md#review-marker) marker.
 3. `apply` runs the pending files in order and records each one.
 4. `status` lists every file as `applied`, `pending`, `changed` or `missing`.
@@ -147,7 +147,7 @@ The tests of this workflow are in `tests/test_migrate.py` and `tests/test_apply.
 
 ## Going further
 
-**How `make` works.** It does not change your data. In one transaction it creates a [scratch schema](glossary.md#scratch-schema), builds your models in it, reads that schema and `public`, writes the difference, and always [rolls back](glossary.md#rollback). So it needs the `CREATE` privilege on the database. Run it against a development database, not production. It compares with `public`: use the database whose schema should be brought up to date. Only the tables your models name are compared, unless you pass `--all-tables`.
+**How `make` works.** It does not change your data. In one transaction it creates a [scratch schema](glossary.md#scratch-schema), builds your models in it, reads that schema and `public`, writes the difference, and always [rolls back](glossary.md#rollback). So it needs the `CREATE` privilege on the database. Run it against a development database, not production. It compares with `public` (on SQLite, with the database file; the scratch database is built in memory, so nothing is created in your file and no `CREATE` privilege is needed): use the database whose schema should be brought up to date. Only the tables your models name are compared, unless you pass `--all-tables`.
 
 **What the differ detects.** Tables created or dropped. Columns added or dropped, and changes of type, `NOT NULL`, default and identity. Primary keys, unique constraints, foreign keys (with `ON DELETE`) and indexes. Renames are not detected.
 

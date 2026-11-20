@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "korbase"
 version = "0.1.0a2"
-description = "Async ORM for Postgres, built the Korvex way."
+description = "Async ORM for Postgres and SQLite, built the Korvex way."
 requires-python = ">=3.10"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Maxime Lefevre" }]
-keywords = ["orm", "async", "postgres", "sql", "database"]
+keywords = ["orm", "async", "postgres", "sqlite", "sql", "database"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Framework :: AsyncIO",

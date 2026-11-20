@@ -135,23 +135,24 @@ author_id: Annotated[Optional[int], FK("users.id", on_delete="set null")] = None
 
 ### Type mapping
 
-Migrations turn each column into a Postgres type with this table. An
-`Optional[T]` maps like `T`.
+Migrations turn each column into a database type with this table. An
+`Optional[T]` maps like `T`. The SQLite column is what `sqlite:` DSNs use (see
+[SQLite](sqlite.md#values-and-raw-sql) for how values are stored).
 
-| Python type | Postgres type |
-|---|---|
-| `bool` | `boolean` |
-| `int` | `bigint` |
-| `float` | `double precision` |
-| `str` | `text` |
-| `bytes` | `bytea` |
-| `uuid.UUID` | `uuid` |
-| `datetime.datetime` | `timestamptz` |
-| `datetime.date` | `date` |
-| `datetime.time` | `time` |
-| `decimal.Decimal` | `numeric` |
-| `dict`, `list` (also `list[...]`) | `jsonb` |
-| an `enum.Enum` subclass | `text` |
+| Python type | Postgres type | SQLite type |
+|---|---|---|
+| `bool` | `boolean` | `INTEGER` |
+| `int` | `bigint` | `INTEGER` |
+| `float` | `double precision` | `REAL` |
+| `str` | `text` | `TEXT` |
+| `bytes` | `bytea` | `BLOB` |
+| `uuid.UUID` | `uuid` | `TEXT` |
+| `datetime.datetime` | `timestamptz` | `TEXT` |
+| `datetime.date` | `date` | `TEXT` |
+| `datetime.time` | `time` | `TEXT` |
+| `decimal.Decimal` | `numeric` | `TEXT` |
+| `dict`, `list` (also `list[...]`) | `jsonb` | `TEXT` |
+| an `enum.Enum` subclass | `text` | `INTEGER` if every value is an `int`, else `TEXT` |
 
 Any other type raises `KorbaseError`, naming the column. Add a `SqlType` to
 choose the type yourself:

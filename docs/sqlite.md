@@ -26,7 +26,7 @@ async def open_db() -> Database:
 
 `sqlite::memory:` always uses one connection, whatever `size` you ask for. Two connections would each see their own empty database. Two calls to `Database.connect("sqlite::memory:")` give two separate databases.
 
-No extra is needed: `pip install korbase` is enough. The scheme `sqlite:` picks the backend. korbase needs SQLite 3.35 or later and raises `RuntimeError` on an older one.
+No extra is needed: `pip install --pre korbase` is enough. The scheme `sqlite:` picks the backend. korbase needs SQLite 3.35 or later and raises `RuntimeError` on an older one.
 
 Options go to `Database.connect` (and to `korvex.install(app, dsn, ...)`):
 

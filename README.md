@@ -71,13 +71,13 @@ asyncio.run(main())
 
 The guide is in `docs/` in the repository. Start with
 [`docs/tutorial.md`](docs/tutorial.md): it builds a small blog database
-with migrations, from zero. The docs site will be at
-https://3d3n-pyc.github.io/korbase/ once it is public.
+with migrations, from zero. The docs site is at
+https://3d3n-pyc.github.io/korbase/, with `llms.txt` for AI assistants.
 
 ## Status
 
 Working today: models, queries, transactions, relations loaded with
-`.load()`, the Korvex integration (`pip install "korbase[korvex]"`) and
+`.load()`, the Korvex integration (`pip install --pre "korbase[korvex]"`) and
 SQL migrations with `python -m korbase.migrate`. SQLite works through the
 standard library, with a `sqlite:///app.db` DSN: see [`docs/sqlite.md`](docs/sqlite.md).
 
