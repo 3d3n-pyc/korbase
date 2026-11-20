@@ -4,14 +4,15 @@ build-backend = "hatchling.build"
 
 [project]
 name = "korbase"
-version = "0.0.1"
+version = "0.1.0a1"
 description = "Async ORM for Postgres, built the Korvex way."
 requires-python = ">=3.10"
+readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "Maxime Lefevre" }]
 keywords = ["orm", "async", "postgres", "sql", "database"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 3 - Alpha",
     "Framework :: AsyncIO",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
@@ -22,8 +23,15 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Topic :: Database",
     "Typing :: Typed",
 ]
+
+[project.urls]
+Homepage = "https://3d3n-pyc.github.io/korbase/"
+Documentation = "https://3d3n-pyc.github.io/korbase/"
+Source = "https://github.com/3d3n-pyc/korbase"
+Changelog = "https://github.com/3d3n-pyc/korbase/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 korpg = []

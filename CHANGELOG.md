@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.0a1
+
+First alpha: models, typed queries, relations, transactions, migrations, Postgres and SQLite, Korvex integration.
 
 - Project skeleton.
 - Models: `@table` on msgspec Structs, dataclasses and TypedDicts, with `PK`, `FK`, `Unique`, `Default`, `Index` and `Rel` markers. No upgrade needed, since there was no API before.
