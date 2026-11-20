@@ -8,7 +8,7 @@ from typing import Any
 
 from korbase._asyncpg import AsyncpgBackend
 from korbase._inspect import inspect
-from korbase._schema import Column, ForeignKey, Index, Snapshot, Table
+from korbase._schema import Column, ForeignKey, Index, Snapshot, Table, normalize_where
 
 SCHEMA = "korbase_test_inspect"
 
@@ -103,5 +103,29 @@ def test_execute_script_two_statements(dsn: str) -> None:
         )
         rows = await conn.fetch(f"SELECT id FROM {SCHEMA}.t", [], tuple)
         assert rows == [(1,)]
+
+    _run(check, dsn)
+
+
+def test_normalize_where() -> None:
+    """Whitespace collapses and one outer paren level goes; others stay."""
+    assert normalize_where("  a   IS\nNOT NULL ") == "a IS NOT NULL"
+    assert normalize_where("(due IS NOT NULL)") == "due IS NOT NULL"
+    assert normalize_where("((a))") == "(a)"
+    assert normalize_where("(a) AND (b)") == "(a) AND (b)"
+
+
+def test_inspect_partial_index(dsn: str) -> None:
+    """A partial index comes back with its predicate; a plain one has None."""
+
+    async def check(conn: Any) -> None:
+        await conn.execute_script(
+            f"CREATE SCHEMA {SCHEMA}; CREATE TABLE {SCHEMA}.t (id integer, due date);"
+            f"CREATE INDEX t_due ON {SCHEMA}.t (due) WHERE due IS NOT NULL;"
+            f"CREATE INDEX t_id ON {SCHEMA}.t (id)"
+        )
+        idx = {i.name: i for i in (await inspect(conn, SCHEMA)).tables["t"].indexes}
+        assert idx["t_due"].where == "due IS NOT NULL"
+        assert idx["t_id"].where is None
 
     _run(check, dsn)

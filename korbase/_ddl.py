@@ -137,7 +137,9 @@ def _index_sql(meta: TableMeta) -> list[str]:
     for idx in meta.indexes:
         name = idx.name or constraint_name(meta.name, "idx", idx.columns)
         unique = "UNIQUE " if idx.unique else ""
-        out.append(f"CREATE {unique}INDEX {quote_ident(name)} ON {quote_ident(meta.name)} ({_cols(idx.columns)})")
+        where = f" WHERE {idx.where}" if idx.where else ""
+        target = f"{quote_ident(name)} ON {quote_ident(meta.name)} ({_cols(idx.columns)})"
+        out.append(f"CREATE {unique}INDEX {target}{where}")
     return out
 
 

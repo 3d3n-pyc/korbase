@@ -6,7 +6,7 @@ import re
 from typing import Any
 
 from korbase._backend import Conn
-from korbase._schema import Column, ForeignKey, Index, Snapshot, Table
+from korbase._schema import Column, ForeignKey, Index, Snapshot, Table, normalize_where
 
 __all__ = ["inspect_sqlite"]
 
@@ -68,6 +68,23 @@ async def _index_columns(conn: Conn, index: str) -> tuple[str | None, ...]:
     return tuple(r[2] for r in sorted(rows, key=lambda r: r[0]))
 
 
+def _predicate(sql: str) -> str:
+    """Return the text after the top-level `WHERE` of a `CREATE INDEX` statement."""
+    depth = 0
+    for m in re.finditer(r"[()]|\s+WHERE\s+", sql, re.IGNORECASE):
+        if m.group() in "()":
+            depth += 1 if m.group() == "(" else -1
+        elif depth == 0:
+            return normalize_where(sql[m.end() :])
+    return ""
+
+
+async def _where(conn: Conn, index: str) -> str | None:
+    """Return the normalised predicate of a partial index, or None."""
+    rows = await conn.fetch("SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?", [index], tuple)
+    return (_predicate(rows[0][0]) or None) if rows and rows[0][0] else None
+
+
 async def _keys(
     conn: Conn, table: str, names: dict[tuple[str, tuple[str, ...]], str]
 ) -> tuple[list[tuple[str, tuple[str, ...]]], list[Index]]:
@@ -82,7 +99,8 @@ async def _keys(
             key = tuple(c for c in cols if c)
             uniques.append((names.get(("UNIQUE", key), f"{table}_{'_'.join(key)}_key"), key))
         else:
-            indexes.append(Index(r[1], tuple(c for c in cols if c), bool(r[2])))
+            where = await _where(conn, r[1]) if r[4] else None
+            indexes.append(Index(r[1], tuple(c for c in cols if c), bool(r[2]), where))
     return sorted(uniques), sorted(indexes, key=lambda i: i.name)
 
 

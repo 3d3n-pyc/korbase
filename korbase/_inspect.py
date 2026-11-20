@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from korbase._backend import Conn
-from korbase._schema import Column, ForeignKey, Index, Snapshot, Table
+from korbase._schema import Column, ForeignKey, Index, Snapshot, Table, normalize_where
 
 __all__ = ["inspect"]
 
@@ -39,7 +39,8 @@ ORDER BY c.relname, k.conname
 _INDEXES = """
 SELECT c.relname, i.relname, x.indisunique,
   ARRAY(SELECT a.attname::text FROM unnest(x.indkey::int2[]) WITH ORDINALITY u(n, o)
-        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = u.n ORDER BY u.o)
+        JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = u.n ORDER BY u.o),
+  pg_get_expr(x.indpred, x.indrelid)
 FROM pg_index x
 JOIN pg_class c ON c.oid = x.indrelid
 JOIN pg_class i ON i.oid = x.indexrelid
@@ -89,6 +90,6 @@ async def inspect(conn: Conn, schema: str = "public") -> Snapshot:
     cons = _split(await _rows(conn, _CONSTRAINTS, schema))
     indexes: dict[str, list[Index]] = {}
     for r in await _rows(conn, _INDEXES, schema):
-        indexes.setdefault(r[0], []).append(Index(r[1], tuple(r[3]), r[2]))
+        indexes.setdefault(r[0], []).append(Index(r[1], tuple(r[3]), r[2], normalize_where(r[4]) if r[4] else None))
     empty: dict[str, list[Any]] = {"p": [], "u": [], "f": []}
     return Snapshot({n: _table(n, c, cons.get(n, empty), indexes.get(n, [])) for n, c in columns.items()})

@@ -80,3 +80,18 @@ def test_quote_in_table_name(tmp_path: Path) -> None:
     weird = _inspect(path).tables['we"ird']
     assert weird.pk == ("id",)
     assert weird.indexes == (Index('we"ird_v', ("v",), False),)
+
+
+def test_partial_index_predicate(tmp_path: Path) -> None:
+    """A partial index carries its normalised predicate; a plain one has None."""
+    path = tmp_path / "p.db"
+    con = sqlite3.connect(path)
+    con.executescript(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, due TEXT, n INTEGER);"
+        "CREATE INDEX t_due ON t (due)  WHERE  due IS NOT NULL\n AND (n > 1 OR n < 0);"
+        "CREATE INDEX t_n ON t (n);"
+    )
+    con.close()
+    idx = {i.name: i for i in _inspect(path).tables["t"].indexes}
+    assert idx["t_due"].where == "due IS NOT NULL AND (n > 1 OR n < 0)"
+    assert idx["t_n"].where is None
