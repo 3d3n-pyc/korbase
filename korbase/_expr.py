@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Generic, NoReturn, TypeVar, Union
 
 from korbase._ident import KorbaseError, quote_ident, validate_ident
@@ -28,6 +29,7 @@ __all__ = [
 ]
 
 T = TypeVar("T")
+M = TypeVar("M")
 
 
 class Param:
@@ -161,7 +163,7 @@ class Column(Expr, Generic[T]):
         """Hash by table and name, so columns work as dict keys."""
         return hash((self.table.name, self.name))
 
-    def __eq__(self, other: Any) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
+    def __eq__(self, other: T | Column[T] | Param | None) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
         """`col == x` is SQL `=`; `col == None` is `IS NULL`.
 
         Only a literal `None` is rewritten. A `param(...)` always uses `=`,
@@ -171,33 +173,33 @@ class Column(Expr, Generic[T]):
             return IsNull(self, negate=False)
         return BinOp("=", self, other)
 
-    def __ne__(self, other: Any) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
+    def __ne__(self, other: T | Column[T] | Param | None) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
         """`col != x` is SQL `<>`; `col != None` is `IS NOT NULL`."""
         if other is None:
             return IsNull(self, negate=True)
         return BinOp("<>", self, other)
 
-    def __lt__(self, other: Any) -> BinOp:
+    def __lt__(self, other: T | Column[T] | Param) -> BinOp:
         """`col < x`."""
         return BinOp("<", self, other)
 
-    def __le__(self, other: Any) -> BinOp:
+    def __le__(self, other: T | Column[T] | Param) -> BinOp:
         """`col <= x`."""
         return BinOp("<=", self, other)
 
-    def __gt__(self, other: Any) -> BinOp:
+    def __gt__(self, other: T | Column[T] | Param) -> BinOp:
         """`col > x`."""
         return BinOp(">", self, other)
 
-    def __ge__(self, other: Any) -> BinOp:
+    def __ge__(self, other: T | Column[T] | Param) -> BinOp:
         """`col >= x`."""
         return BinOp(">=", self, other)
 
-    def like(self, other: Any) -> BinOp:
+    def like(self: Column[str], other: str | Param) -> BinOp:
         """SQL `LIKE`."""
         return BinOp("LIKE", self, other)
 
-    def ilike(self, other: Any) -> BinOp:
+    def ilike(self: Column[str], other: str | Param) -> BinOp:
         """SQL `ILIKE` (case-insensitive)."""
         return BinOp("ILIKE", self, other)
 
@@ -209,7 +211,7 @@ class Column(Expr, Generic[T]):
         """SQL `IS NOT NULL`."""
         return IsNull(self, negate=True)
 
-    def in_(self, values: Any) -> InAny:
+    def in_(self, values: Sequence[T] | Param) -> InAny:
         """SQL `= ANY($n)`; pass a `param(...)` or a list of values."""
         return InAny(self, values)
 
@@ -313,7 +315,7 @@ class Not(Expr):
         return f"(NOT {_sql(self.inner, ctx)})"
 
 
-class RelRef:
+class RelRef(Generic[M]):
     """A reference to a relation field, used by `.load`."""
 
     __slots__ = ("table", "rel")
@@ -330,7 +332,7 @@ class Cols(Generic[T]):
     def __init__(self, meta: TableMeta) -> None:
         """Index the columns and relations of `meta`."""
         self._meta = meta
-        self._items: dict[str, Union[Column[Any], RelRef]] = {}
+        self._items: dict[str, Union[Column[Any], RelRef[Any]]] = {}
         for c in meta.columns:
             self._items[c.name] = Column(meta, c.name)
         for r in meta.relations:
