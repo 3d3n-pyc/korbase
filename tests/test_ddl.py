@@ -74,7 +74,10 @@ def test_render_literal() -> None:
     assert render_literal(False) == "FALSE"
     assert render_literal(3) == "3"
     assert render_literal(1.5) == "1.5"
-    assert render_literal("it's") == "'it''s'"
+    assert render_literal("it's") == "E'it''s'"
+    assert render_literal("a\\b") == "E'a\\\\b'"
+    with pytest.raises(KorbaseError):
+        render_literal("a\x00b")
     for bad in (float("nan"), float("inf"), b"x"):
         with pytest.raises(KorbaseError):
             render_literal(bad)
@@ -99,7 +102,7 @@ def test_create_table_sql_exact() -> None:
         '    "meta" jsonb NOT NULL,\n'
         '    "tags" jsonb NOT NULL,\n'
         '    "color" text NOT NULL,\n'
-        "    \"note\" text NOT NULL DEFAULT 'it''s',\n"
+        "    \"note\" text NOT NULL DEFAULT E'it''s',\n"
         '    CONSTRAINT "things_pkey" PRIMARY KEY ("id"),\n'
         '    CONSTRAINT "things_name_key" UNIQUE ("name")\n'
         ")"
@@ -191,3 +194,45 @@ def check(snap: Any) -> None:
 def test_create_all_on_postgres(dsn: str) -> None:
     """The generated DDL runs and inspects back to what the models say."""
     _run(dsn)
+
+
+@table("lit_things")
+@dataclass
+class LitThing:
+    """A table whose default holds a backslash and a quote, with an enum from public."""
+
+    id: Annotated[int, PK()]
+    note: Annotated[str, Default("a\\'; DROP TABLE x; --")]
+    mood: Annotated[str, SqlType("korbase_test_mood")]
+
+
+def test_literal_safe_without_standard_conforming_strings(dsn: str) -> None:
+    """Defaults stay one literal with the setting off; public types resolve."""
+
+    async def main() -> str:
+        pool = await AsyncpgBackend().connect(dsn)
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute_script(
+                    f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; DROP TYPE IF EXISTS public.korbase_test_mood;"
+                    f" CREATE TYPE public.korbase_test_mood AS ENUM ('ok'); CREATE SCHEMA {SCHEMA}"
+                )
+                try:
+                    async with conn.transaction():
+                        await conn.execute_script("SET LOCAL standard_conforming_strings = off")
+                        await create_all(conn, [LitThing], SCHEMA)
+                    rows = await conn.fetch(
+                        "SELECT column_default FROM information_schema.columns"
+                        " WHERE table_schema = $1 AND table_name = 'lit_things' AND column_name = 'note'",
+                        [SCHEMA],
+                        lambda r: r[0],
+                    )
+                    return await conn.fetchrow(f"SELECT ({rows[0]})::text", [], lambda r: r[0]) or ""
+                finally:
+                    await conn.execute_script(
+                        f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE; DROP TYPE public.korbase_test_mood"
+                    )
+        finally:
+            await pool.close()
+
+    assert asyncio.run(main()) == "a\\'; DROP TABLE x; --"

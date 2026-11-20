@@ -52,8 +52,8 @@ def render_literal(value: Any) -> str:
     """Return `value` as a SQL literal for a column default.
 
     Handles None, bool, finite numbers and str. Strings double their single
-    quotes, which is only safe with `standard_conforming_strings = on`
-    (the Postgres default).
+    quotes and backslashes in an escape string (`E'...'`), which is safe
+    whatever `standard_conforming_strings` is. A NUL character is refused.
     """
     if value is None:
         return "NULL"
@@ -64,7 +64,9 @@ def render_literal(value: Any) -> str:
     if isinstance(value, float) and math.isfinite(value):
         return repr(value)
     if isinstance(value, str):
-        return "'" + value.replace("'", "''") + "'"
+        if "\x00" in value:
+            raise KorbaseError("a default string cannot contain a NUL character")
+        return "E'" + value.replace("\\", "\\\\").replace("'", "''") + "'"
     raise KorbaseError(f"unsupported default value: {value!r}")
 
 
@@ -148,5 +150,5 @@ async def create_all(conn: Conn, models: typing.Iterable[type], schema: str | No
     """
     statements = create_all_sql(models)
     if schema is not None:
-        statements.insert(0, f"SET LOCAL search_path TO {quote_ident(schema)}")
+        statements.insert(0, f"SET LOCAL search_path TO {quote_ident(schema)}, public")
     await conn.execute_script(";\n".join(statements))

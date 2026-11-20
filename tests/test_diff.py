@@ -133,7 +133,9 @@ def test_index():
     ix = tbl("a", (ID, col("x")), indexes=(Index("a_x_idx", ("x",), False),))
     uq = tbl("a", (ID, col("x")), indexes=(Index("a_x_idx", ("x",), True),))
     assert sql_of(snap(BASE), snap(ix)) == 'CREATE INDEX "a_x_idx" ON "a" ("x");\n'
-    assert sql_of(snap(ix), snap(BASE)) == 'DROP INDEX "a_x_idx";\n'
+    assert sql_of(snap(ix), snap(BASE)) == (
+        '-- korbase:review index not managed by korbase or removed from the models\nDROP INDEX "a_x_idx";\n'
+    )
     assert sql_of(snap(ix), snap(uq)) == 'DROP INDEX "a_x_idx";\nCREATE UNIQUE INDEX "a_x_idx" ON "a" ("x");\n'
 
 
@@ -170,3 +172,62 @@ def test_deterministic():
     first = sql_of(snap(), snap(*tables))
     assert first == sql_of(snap(), snap(*reversed(tables)))
     assert first.index('"a"') < first.index('"b"') < first.index('"c"')
+
+
+def test_pk_change_drops_and_readds_dependent_fks():
+    fk = ForeignKey("c_a_fkey", ("a_id",), "a", ("id",), "no action")
+    c = tbl("c", (ID, col("a_id", "bigint")), foreign_keys=(fk,))
+    old_a = tbl("a", (ID, col("x", "text", False)))
+    new_a = tbl("a", (ID, col("x", "text", False)), pk=("x",))
+    assert sql_of(snap(old_a, c), snap(new_a, c)) == (
+        'ALTER TABLE "c" DROP CONSTRAINT "c_a_fkey";\n'
+        "-- korbase:review primary key of a changes\n"
+        'ALTER TABLE "a" DROP CONSTRAINT "a_pkey";\n'
+        'ALTER TABLE "a" ADD CONSTRAINT "a_pkey" PRIMARY KEY ("x");\n'
+        'ALTER TABLE "c" ADD CONSTRAINT "c_a_fkey" FOREIGN KEY ("a_id") REFERENCES "a" ("id") ON DELETE NO ACTION;\n'
+    )
+
+
+def test_pk_change_dependent_fk_removed_is_not_readded():
+    fk = ForeignKey("c_a_fkey", ("a_id",), "a", ("id",), "no action")
+    c = tbl("c", (ID, col("a_id", "bigint")), foreign_keys=(fk,))
+    c2 = tbl("c", (ID, col("a_id", "bigint")))
+    new_a = tbl("a", (ID, col("x", "text", False)), pk=("x",))
+    out = sql_of(snap(BASE, c), snap(new_a, c2))
+    assert out.count('DROP CONSTRAINT "c_a_fkey"') == 1
+    assert 'ADD CONSTRAINT "c_a_fkey"' not in out
+
+
+def test_type_change_with_default():
+    old = tbl("a", (ID, col("v", "text", True, "'x'")))
+    new = tbl("a", (ID, col("v", "integer", True, "0")))
+    assert sql_of(snap(old), snap(new)) == (
+        'ALTER TABLE "a" ALTER COLUMN "v" DROP DEFAULT;\n'
+        "-- korbase:review type of a.v changes from text to integer\n"
+        'ALTER TABLE "a" ALTER COLUMN "v" TYPE integer USING "v"::integer;\n'
+        'ALTER TABLE "a" ALTER COLUMN "v" SET DEFAULT 0;\n'
+    )
+
+
+def test_type_change_dropping_default():
+    old = tbl("a", (ID, col("v", "text", True, "'x'")))
+    new = tbl("a", (ID, col("v", "integer")))
+    out = sql_of(snap(old), snap(new))
+    assert out.count("DROP DEFAULT") == 1
+    assert "SET DEFAULT" not in out
+    assert out.index("DROP DEFAULT") < out.index("TYPE integer")
+
+
+def test_drop_index_review():
+    old = tbl("a", (ID, col("x")), indexes=(Index("a_x_idx", ("x",), False),))
+    assert sql_of(snap(old), snap(BASE)) == (
+        '-- korbase:review index not managed by korbase or removed from the models\nDROP INDEX "a_x_idx";\n'
+    )
+
+
+def test_add_not_null_column_without_default_review():
+    new = tbl("a", (ID, col("x"), col("y", "integer", False)))
+    assert sql_of(snap(BASE), snap(new)) == (
+        "-- korbase:review NOT NULL column without default fails on a non-empty table\n"
+        'ALTER TABLE "a" ADD COLUMN "y" integer NOT NULL;\n'
+    )

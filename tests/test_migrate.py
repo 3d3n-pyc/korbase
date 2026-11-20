@@ -146,3 +146,36 @@ def test_cli_bad_dsn_hidden(tmp_path: Path) -> None:
     r = _cli(bad, tmp_path, "status", "--dir", "mig")
     assert r.returncode == 1
     assert "s3cretpw" not in r.stderr and "s3cretpw" not in r.stdout
+
+
+def test_cli_dsn_flag_wins(dsn: str, tmp_path: Path) -> None:
+    """--dsn beats KORBASE_DSN."""
+    (tmp_path / "mig").mkdir()
+    env = {**os.environ, "KORBASE_DSN": "postgresql://u:pw@127.0.0.1:1/x"}
+    cmd = [sys.executable, "-m", "korbase.migrate", "status", "--dir", "mig", "--dsn", dsn]
+    r = subprocess.run(cmd, env=env, capture_output=True, text=True, cwd=tmp_path)
+    assert r.returncode == 0, r.stderr
+
+
+def test_make_no_models(dsn: str, tmp_path: Path) -> None:
+    """An empty model list is an error, in the API and the CLI."""
+    (tmp_path / "mg_empty.py").write_text("X = 1\n")
+
+    async def body(db: Database) -> None:
+        with pytest.raises(KorbaseError, match="no models"):
+            await make(db, [], tmp_path / "mig", "x")
+
+    _run(dsn, body)
+    r = _cli(dsn, tmp_path, "make", "--models", "mg_empty", "--dir", "mig")
+    assert r.returncode == 1
+    assert "no models found in mg_empty" in r.stderr
+    assert "Traceback" not in r.stderr
+
+
+def test_cli_errors_are_one_line(dsn: str, tmp_path: Path) -> None:
+    """Unexpected errors give one line and exit 1, never a traceback or the DSN."""
+    (tmp_path / "mig").write_text("not a directory")
+    r = _cli(dsn, tmp_path, "apply", "--dir", "mig")
+    assert r.returncode == 1
+    assert r.stderr.startswith("error: ") and "Traceback" not in r.stderr
+    assert dsn not in r.stderr

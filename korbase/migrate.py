@@ -3,7 +3,8 @@
 `make` compares your models with the database and writes the SQL file that
 closes the gap; `apply` runs the reviewed files; `status` lists them. From a
 shell: `python -m korbase.migrate make --models app.models --dir migrations`.
-The DSN comes from the `KORBASE_DSN` environment variable, or `--dsn`.
+The DSN comes from `--dsn`, or else the `KORBASE_DSN` environment variable;
+`--dsn` wins. Prefer the variable: a command-line argument shows up in `ps`.
 """
 
 from __future__ import annotations
@@ -87,7 +88,10 @@ async def make(db: Database, models: Iterable[type], directory: str | os.PathLik
     Returns the new file's path, or None when nothing differs. The database is
     left untouched: the comparison runs in a transaction that is rolled back.
     """
-    sql = await _changes(db, list(models))
+    models = list(models)
+    if not models:
+        raise KorbaseError("no models given")
+    sql = await _changes(db, models)
     if not sql:
         return None
     return _write_new(Path(directory), message, sql)
@@ -97,9 +101,12 @@ def collect_models(module_path: str) -> list[type]:
     """Import the module `module_path` and return its `@table` classes.
 
     Classes defined in it or imported into it count; each appears once.
+    Raises KorbaseError when the module holds none.
     """
     module = importlib.import_module(module_path)
     found = [v for v in vars(module).values() if isinstance(v, type) and _ATTR in v.__dict__]
+    if not found:
+        raise KorbaseError(f"no models found in {module_path}")
     return list(dict.fromkeys(found))
 
 
@@ -110,7 +117,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--models", help="dotted path of the module holding the models")
     p.add_argument("--dir", default="migrations", help="migrations directory")
     p.add_argument("-m", "--message", default="migration", help="name for the new file")
-    p.add_argument("--dsn", help="database DSN (default: $KORBASE_DSN)")
+    p.add_argument("--dsn", help="database DSN; wins over $KORBASE_DSN (visible in `ps`: prefer the variable)")
     return p
 
 
@@ -135,7 +142,7 @@ async def _run(args: argparse.Namespace, dsn: str) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """Run the command line; return the exit code (0 on success, 1 on error)."""
     args = _parser().parse_args(argv)
-    dsn = os.environ.get("KORBASE_DSN") or args.dsn
+    dsn = args.dsn or os.environ.get("KORBASE_DSN")
     if not dsn:
         print("error: set KORBASE_DSN or pass --dsn", file=sys.stderr)
         return 1
@@ -144,7 +151,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     try:
         asyncio.run(_run(args, dsn))
-    except (KorbaseError, ImportError, OSError) as exc:
+    except Exception as exc:
         print(f"error: {str(exc).replace(dsn, '***')}", file=sys.stderr)
         return 1
     return 0
