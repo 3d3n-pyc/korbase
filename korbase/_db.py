@@ -7,7 +7,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, Optional, TypeVar, Union, overload
 
 from korbase._backend import Backend, Conn, Pool
-from korbase._build import current_dialect, decoding_rows, named_builder, positional_builder, validating_builder
+from korbase._build import decoding_rows, named_builder, positional_builder, validating_builder
 from korbase._dialect import PG, Dialect
 from korbase._expr import Param
 from korbase._ident import KorbaseError
@@ -132,14 +132,7 @@ class _Runner:
 
     async def _load(self, conn: Conn, rows: list[Any], query: Any) -> None:
         """Load the relations of `query` into `rows`, decoding children by dialect."""
-        if self._dialect is PG:
-            await load_relations(conn, rows, query._loads, self._validate)
-            return
-        token = current_dialect.set(self._dialect)
-        try:
-            await load_relations(conn, rows, query._loads, self._validate, self._dialect)
-        finally:
-            current_dialect.reset(token)
+        await load_relations(conn, rows, query._loads, self._validate, self._dialect)
 
     async def first(self, query: Rows[M], /, **params: Any) -> Optional[M]:
         """Run a query that returns rows and return the first model, or `None`.

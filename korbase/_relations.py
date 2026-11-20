@@ -52,7 +52,7 @@ async def _fetch_in(
     names = ", ".join(f"{t}.{quote_ident(c.name)}" for c in target.columns)
     where = dialect.any_of(f"{t}.{quote_ident(column)}", dialect.placeholder(1))
     sql = f"SELECT {names} FROM {t} WHERE {where}"
-    builder = validating_builder(target) if validate else positional_builder(target)
+    builder = validating_builder(target, dialect) if validate else positional_builder(target, dialect)
     return await conn.fetch(sql, [dialect.encode_param(values)], builder)
 
 

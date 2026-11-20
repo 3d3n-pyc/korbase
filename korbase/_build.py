@@ -5,7 +5,6 @@ from __future__ import annotations
 import dataclasses
 import inspect
 from collections.abc import Sequence
-from contextvars import ContextVar
 from functools import partial
 from typing import Any, Optional
 
@@ -18,7 +17,6 @@ __all__ = ["positional_builder", "named_builder", "validating_builder"]
 
 _NAMED: dict[tuple[type, tuple[str, ...], str], RowBuilder[Any]] = {}
 _PLAIN = (int, float, str, bytes)
-current_dialect: ContextVar[Dialect] = ContextVar("korbase_dialect", default=PG)
 
 
 def _positional_params(model: type) -> list[str]:
@@ -108,7 +106,7 @@ def decoding_rows(model: type, names: Sequence[str], dialect: Dialect) -> Any:
 
 def positional_builder(meta: TableMeta, dialect: Optional[Dialect] = None) -> RowBuilder[Any]:
     """Return a builder for rows in column order, with no validation."""
-    dialect = dialect or current_dialect.get()
+    dialect = dialect or PG
     names = tuple(c.name for c in meta.columns)
     build: RowBuilder[Any] = _positional(meta)
     return build if dialect is PG else _decoding(build, _decoders(meta, names, dialect))
@@ -179,7 +177,7 @@ def validating_builder(meta: TableMeta, dialect: Optional[Dialect] = None) -> Ro
     """Return a builder that validates each row with `msgspec.convert`."""
     import msgspec
 
-    dialect = dialect or current_dialect.get()
+    dialect = dialect or PG
 
     names = tuple(c.name for c in meta.columns)
     model = meta.model
