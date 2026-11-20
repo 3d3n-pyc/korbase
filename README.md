@@ -1,6 +1,6 @@
 # korbase
 
-An async ORM for Postgres, built the Korvex way. It is pure Python.
+An async ORM for Postgres and SQLite, built the Korvex way. It is pure Python.
 Models are msgspec Structs, dataclasses or TypedDicts. The driver is
 asyncpg. It has SQL migrations, written for you and applied after review.
 
@@ -76,9 +76,10 @@ https://3d3n-pyc.github.io/korbase/ once it is public.
 
 Working today: models, queries, transactions, relations loaded with
 `.load()`, the Korvex integration (`pip install "korbase[korvex]"`) and
-SQL migrations with `python -m korbase.migrate`.
+SQL migrations with `python -m korbase.migrate`. SQLite works through the
+standard library, with a `sqlite:///app.db` DSN: see [`docs/sqlite.md`](docs/sqlite.md).
 
-Not yet: SQLite, joins in the query builder, and the korpg driver (its
+Not yet: joins in the query builder, and the korpg driver (its
 extra is empty). `.load()` raises `KorbaseError` on tables with a composite
 primary key.
 

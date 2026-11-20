@@ -156,6 +156,23 @@ async def get_book(id: int, tx=Depends(kdb.transaction)):
 `Depends(kdb.database)` gives the `Database`; `Depends(kdb.transaction)` a
 `Transaction` per request, committed unless the handler raises.
 
+## SQLite
+
+`Database.connect("sqlite:///app.db")` (or `"sqlite::memory:"`, one
+connection only) uses the standard library: nothing to install, SQLite
+3.35 or later. Models, queries and migrations are the same. Differences:
+
+- Raw SQL takes `?` placeholders, not `$1`, and returns stored values:
+  `1` for `True`, text for UUID, Decimal and dates (UTC datetimes), JSON
+  text for dict and list. Pass `model=` to get Python types back.
+- `ilike` ignores case for ASCII letters only. One writer at a time:
+  `db.transaction()` is `BEGIN IMMEDIATE`; a busy file raises
+  `sqlite3.OperationalError: database is locked` after `busy_timeout_ms`.
+- `migrate make` cannot alter a type, nullability, default or key in place:
+  it writes a `-- korbase:review` block with `-- intended:`. Replace it with a
+  table rebuild (new table, copy, drop, rename), see `docs/sqlite.md`.
+- Not in the builder yet: partial indexes, aggregates. Use raw SQL.
+
 ## Common mistakes
 
 - `and` / `or` / `not` on conditions: they raise. Use `&`, `|`, `~`, and

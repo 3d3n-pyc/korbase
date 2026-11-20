@@ -27,6 +27,7 @@
 - `python -m korbase.stubs <models.module> -o <file>` generates a module with a typed `cols()`: `cols(Post).title` is a `Column[str]` and `cols(Post).titel` is a type error. At runtime it is the same object as `korbase.cols`. Rerun it after changing models; `--check` exits 1 if the file is out of date, for CI.
 - Column operators are typed: `like` and `ilike` only on `str` columns, and `<`, `==` and `in_()` take values of the column type. Keyword filters such as `.where(title=...)` are still checked at runtime only.
 - `@table` keeps the class type, so `run(select(Post))` is `list[Post]` for the type checker.
+- SQLite backend on the standard library `sqlite3` (SQLite 3.35 or later): `Database.connect("sqlite:///app.db")` or `"sqlite::memory:"`, with `size=` and `busy_timeout_ms=`. WAL, foreign keys and a busy timeout are set on each connection; transactions use `BEGIN IMMEDIATE`, so one process writes at a time. Migrations work on SQLite, but it cannot alter a column type, nullability, default, primary key, unique constraint or foreign key in place: `make` writes a `-- korbase:review` block with the intended change, and you write the table rebuild by hand (see `docs/sqlite.md`). Limits: `sqlite::memory:` uses one connection; `ilike` only ignores case for ASCII letters; raw SQL uses `?` placeholders and returns stored values (`1` for `True`, text for dates and decimals); partial indexes and aggregates are not in the builder yet. No upgrade needed.
 
 ### Changed (typing only)
 
