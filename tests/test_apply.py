@@ -186,3 +186,54 @@ def test_standard_conforming_strings_forced_on(dsn: str, tmp_path: Path) -> None
         assert rows == [("on",)]
 
     _run(dsn, body)
+
+
+def _sqlite_run(tmp_path: Path, body: Callable[[Database, Database], Awaitable[Any]]) -> Any:
+    """Run `body` with two Database objects on one SQLite file."""
+
+    async def main() -> Any:
+        """Connect twice, run."""
+        dsn = f"sqlite:///{tmp_path / 'ap.db'}"
+        async with await Database.connect(dsn) as a, await Database.connect(dsn) as b:
+            return await body(a, b)
+
+    return asyncio.run(main())
+
+
+def test_sqlite_apply_status_refusals(tmp_path: Path) -> None:
+    """On SQLite: apply once, no-transaction file, tampered and missing refusals."""
+    d = tmp_path / "mig"
+    d.mkdir()
+    _write(d, "0001_a.sql", "CREATE TABLE m_a (id int);")
+    _write(d, "0002_b.sql", "-- korbase:no-transaction\nCREATE TABLE m_b (id int);")
+
+    async def body(db: Database, _other: Database) -> None:
+        """Apply, tamper, delete."""
+        assert await status(db, d) == [("0001_a.sql", "pending"), ("0002_b.sql", "pending")]
+        assert await apply(db, d) == ["0001_a.sql", "0002_b.sql"]
+        assert await apply(db, d) == []
+        _write(d, "0001_a.sql", "CREATE TABLE m_a (id int, x int);")
+        with pytest.raises(KorbaseError, match="changed"):
+            await apply(db, d)
+        (d / "0001_a.sql").unlink()
+        with pytest.raises(KorbaseError, match="missing"):
+            await apply(db, d)
+
+    _sqlite_run(tmp_path, body)
+
+
+def test_sqlite_concurrent_apply(tmp_path: Path) -> None:
+    """Two applies on one file apply each migration once."""
+    d = tmp_path / "mig"
+    d.mkdir()
+    for i in range(1, 6):
+        _write(d, f"000{i}_t{i}.sql", f"CREATE TABLE t{i} (id int);")
+
+    async def body(a: Database, b: Database) -> None:
+        """Race the two."""
+        first, second = await asyncio.gather(apply(a, d), apply(b, d), return_exceptions=True)
+        ran = [x for x in (first, second) if isinstance(x, list)]
+        assert ran
+        assert sorted(n for x in ran for n in x) == sorted(f"000{i}_t{i}.sql" for i in range(1, 6))
+
+    _sqlite_run(tmp_path, body)
