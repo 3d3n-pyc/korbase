@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Generic, Optional, TypeVar, Union, overload
 
@@ -55,6 +56,7 @@ JB = TypeVar("JB")
 JC = TypeVar("JC")
 
 Slot = Union[Param, Value]
+_MAX_PARAMS = 32766
 
 
 @dataclass(frozen=True)
@@ -454,14 +456,40 @@ class Insert(_Query[M]):
         """Start with the default values."""
         super().__init__(model)
         self._values: Optional[dict[str, Slot]] = None
+        self._rows: Optional[list[dict[str, Slot]]] = None
 
     def values(self: _Q, **values: Any) -> _Q:
         """Set the columns to insert; plain values become anonymous slots."""
         self._check_columns(values)  # type: ignore[attr-defined]
-        return self._replace(_values=_slots(values))
+        return self._replace(_values=_slots(values), _rows=None)
+
+    def rows(self: _Q, rows: Sequence[Mapping[str, Any]]) -> _Q:
+        """Insert many rows in one statement; each row is a mapping like `.values(...)`.
+
+        Every row must have the same keys, and the rows come back in input order.
+        Columns missing from every row use their default. The list must not be
+        empty and may hold at most 32766 bound values; split larger lists into
+        batches. Replaces earlier `.rows(...)` and `.values(...)`.
+        """
+        slots = [_slots(dict(r)) for r in rows]
+        self._check_rows(slots)  # type: ignore[attr-defined]
+        return self._replace(_rows=slots, _values=None)
+
+    def _check_rows(self, rows: list[dict[str, Slot]]) -> None:
+        """Raise `KorbaseError` if `rows` is empty, uneven, unknown or too large."""
+        if not rows or not rows[0]:
+            raise KorbaseError("rows needs at least one row with at least one column")
+        keys = set(rows[0])
+        if any(set(r) != keys for r in rows):
+            raise KorbaseError("every row must have the same columns")
+        self._check_columns(keys)
+        if len(rows) * len(keys) > _MAX_PARAMS:
+            raise KorbaseError(f"too many values (over {_MAX_PARAMS}); split the list into smaller batches")
 
     def _row(self) -> dict[str, Slot]:
         """Return the values to insert, defaulting to same-named params."""
+        if self._rows is not None:
+            return self._rows[0]
         if self._values is not None:
             return self._values
         return {c.name: Param(c.name) for c in self._meta.columns if c.default is None}
@@ -472,8 +500,8 @@ class Insert(_Query[M]):
         if not row:
             return f"INSERT INTO {self._table()} DEFAULT VALUES" + self._tail()
         names = ", ".join(quote_ident(k) for k in row)
-        marks = ", ".join(ctx.add(v) for v in row.values())
-        sql = f"INSERT INTO {self._table()} ({names}) VALUES ({marks})" + self._conflict_sql()
+        groups = ", ".join("(" + ", ".join(ctx.add(v) for v in r.values()) + ")" for r in self._rows or [row])
+        sql = f"INSERT INTO {self._table()} ({names}) VALUES {groups}" + self._conflict_sql()
         return sql + self._tail()
 
     def _conflict_sql(self) -> str:
@@ -561,10 +589,26 @@ class Upsert(Insert[M]):
         self._check_columns(columns)
         return self._replace(_conflict=tuple(columns))
 
+    def _check_repeats(self) -> None:
+        """Raise `KorbaseError` if two rows hold the same conflict-key values."""
+        seen: set[Any] = set()
+        for r in self._rows or ():
+            slots = [r.get(c) for c in self._conflict]
+            if not all(isinstance(v, Value) for v in slots):
+                return
+            try:
+                key = tuple(v.value for v in slots)  # type: ignore[union-attr]
+                if key in seen:
+                    raise KorbaseError(f"two rows have the same {', '.join(self._conflict)} value")
+                seen.add(key)
+            except TypeError:
+                return
+
     def _conflict_sql(self) -> str:
         """Return the `ON CONFLICT ... DO UPDATE` clause."""
         if not self._conflict:
             raise KorbaseError("upsert needs .on_conflict(...)")
+        self._check_repeats()
         skip = set(self._conflict) | set(self._meta.pk)
         keys = [k for k in self._row() if k not in skip]
         cl = ", ".join(quote_ident(c) for c in self._conflict)
