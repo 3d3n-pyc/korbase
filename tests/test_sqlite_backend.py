@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from korbase._errors import ForeignKeyViolation
 from korbase._sqlite import SqliteBackend
 
 
@@ -46,7 +47,7 @@ async def _test_foreign_keys_and_tags(tmp_path: Path) -> None:
         await c.execute("CREATE TABLE ch (pid INTEGER REFERENCES p(id))", [])
         assert await c.execute("INSERT INTO p (id) VALUES (?1)", [1]) == "INSERT 0 1"
         assert await c.execute("UPDATE p SET id = ?1 WHERE id = ?2", [1, 1]) == "UPDATE 1"
-        with pytest.raises(sqlite3.IntegrityError):
+        with pytest.raises(ForeignKeyViolation):
             await c.execute("INSERT INTO ch (pid) VALUES (?1)", [99])
         assert await c.fetchrow("SELECT id FROM p WHERE id = ?1", [1], _row) == (1,)
         assert await c.fetchrow("SELECT id FROM p WHERE id = ?1", [5], _row) is None

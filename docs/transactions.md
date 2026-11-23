@@ -94,7 +94,7 @@ async with db.transaction() as tx:
     await tx.execute("UPDATE accounts SET balance = balance + $1 WHERE id = $2", 10, 2)
 ```
 
-If the second statement fails, the first is undone.
+If the second statement fails, the first is undone. A failure from the database is a korbase exception, such as `UniqueViolation` or `DatabaseBusy`: see [Errors](errors.md).
 
 Use `tx`, not `db`, for the queries inside the block. A call on `db` borrows another connection, so it runs outside the transaction.
 
@@ -136,4 +136,4 @@ one = await db.fetchrow("SELECT * FROM users WHERE id = $1", 1, model=User)  # m
 - **`validate=True` costs time.** Each row goes through `msgspec.convert`, and a wrong type raises `msgspec.ValidationError`. The same check applies to raw rows with `model=`. It needs msgspec installed. Keep the default when the database already guarantees the types, and measure before you turn it on for hot queries.
 - **Tests.** The tests run against a real Postgres. Start one with `bash tests/pg/start.sh`, which prints the export line for `KORBASE_TEST_DSN`. The tests for this page are in `tests/test_db.py`.
 
-**Next:** [Migrations](migrations.md)
+**Next:** [Errors](errors.md)
