@@ -205,6 +205,20 @@ def _slots(values: dict[str, Any]) -> dict[str, Slot]:
     return {k: v if isinstance(v, (Param, Value)) else Value(v) for k, v in values.items()}
 
 
+def _row_slots(rows: Any) -> list[dict[str, Slot]]:
+    """Wrap each row's values as `Value`, all in the first row's key order."""
+    if isinstance(rows, (Mapping, str, bytes)) or not isinstance(rows, Sequence):
+        raise KorbaseError("rows() takes a list of dicts")
+    if not all(isinstance(r, Mapping) for r in rows):
+        raise KorbaseError("rows() takes a list of dicts")
+    if any(isinstance(v, (Param, Value)) for r in rows for v in r.values()):
+        raise KorbaseError("rows() takes plain values, not param()")
+    if not rows:
+        return []
+    order = list(rows[0])
+    return [_slots({k: r[k] for k in order if k in r} | {k: r[k] for k in r if k not in order}) for r in rows]
+
+
 class _Ordered(_Filtered[M]):
     """A filtered `SELECT` with order and paging; can switch to chosen columns."""
 
@@ -471,7 +485,7 @@ class Insert(_Query[M]):
         empty and may hold at most 32766 bound values; split larger lists into
         batches. Replaces earlier `.rows(...)` and `.values(...)`.
         """
-        slots = [_slots(dict(r)) for r in rows]
+        slots = _row_slots(rows)
         self._check_rows(slots)  # type: ignore[attr-defined]
         return self._replace(_rows=slots, _values=None)
 

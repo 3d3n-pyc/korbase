@@ -8,7 +8,7 @@ from typing import Annotated, Optional
 import msgspec
 import pytest
 
-from korbase import PK, Database, KorbaseError, insert, table, upsert
+from korbase import PK, Database, KorbaseError, insert, param, table, upsert
 from korbase._dialect import PG, SQLITE
 
 
@@ -100,3 +100,31 @@ def test_thousand_rows(backend_dsn: str) -> None:
         assert [r.id for r in got] == list(range(1000))
 
     run(backend_dsn, body)
+
+
+def test_rows_bind_in_first_row_order(backend_dsn: str) -> None:
+    rows = [{"id": 1, "title": "x", "n": 1}, {"n": 2, "title": "y", "id": 2}]
+
+    async def body(db: Database) -> None:
+        got = await db.run(insert(Item).rows(rows))
+        assert [(i.id, i.title, i.n) for i in got] == [(1, "x", 1), (2, "y", 2)]
+        got = await db.run(upsert(Item).rows(rows[::-1]).on_conflict("id"))
+        assert sorted((i.id, i.title, i.n) for i in got) == [(1, "x", 1), (2, "y", 2)]
+
+    run(backend_dsn, body)
+    sql = insert(Item).rows(rows).compile(PG)
+    assert [s.value for s in sql.slots]  # type: ignore[union-attr] == [1, "x", 1, 2, "y", 2]
+
+
+def test_rows_refuse_param() -> None:
+    with pytest.raises(KorbaseError, match="plain values"):
+        insert(Item).rows([{"id": param("i"), "title": "a"}])
+    with pytest.raises(KorbaseError, match="plain values"):
+        upsert(Item).rows([{"id": 1, "title": param("t")}])
+
+
+def test_rows_refuse_non_list() -> None:
+    with pytest.raises(KorbaseError, match="list of dicts"):
+        insert(Item).rows({"title": "z"})  # type: ignore[arg-type]
+    with pytest.raises(KorbaseError, match="list of dicts"):
+        insert(Item).rows([{"id": 1, "title": "a"}, ["id", 2]])  # type: ignore[list-item]
