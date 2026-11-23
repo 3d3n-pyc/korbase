@@ -132,3 +132,38 @@ def test_bad_port_is_connection_failed() -> None:
     with pytest.raises(ConnectionFailed) as info:
         asyncio.run(Database.connect("postgresql://korbase:korbase@127.0.0.1:1/none"))
     assert info.value.__cause__ is not None
+
+
+def test_client_side_input_error_hides_the_value(dsn: str) -> None:
+    async def body(db: Database) -> None:
+        with pytest.raises(DatabaseError) as info:
+            await db.execute("INSERT INTO kbe_users (id) VALUES ($1)", "secret-token-123")
+        assert str(info.value) == "invalid value for query argument $1"
+        assert "secret-token-123" not in str(info.value)
+
+    _run(dsn, body)
+
+
+def test_interface_error_is_translated(dsn: str) -> None:
+    async def body(db: Database) -> None:
+        async with db.transaction() as tx:
+            raw = tx._bound._conn  # type: ignore[attr-defined]
+            task = asyncio.ensure_future(raw.execute("SELECT pg_sleep(0.3)"))
+            await asyncio.sleep(0.05)
+            with pytest.raises(DatabaseError) as info:
+                await tx.execute("SELECT 1")
+            assert isinstance(info.value.__cause__, asyncpg.InterfaceError)
+            assert not isinstance(info.value, ConnectionFailed)
+            await task
+
+    _run(dsn, body)
+
+
+def test_command_timeout_has_a_message(dsn: str) -> None:
+    async def main() -> None:
+        async with await Database.connect(dsn, command_timeout=0.1) as db:
+            with pytest.raises(ConnectionFailed, match="timed out") as info:
+                await db.execute("SELECT pg_sleep(2)")
+            assert isinstance(info.value.__cause__, asyncio.TimeoutError)
+
+    asyncio.run(main())

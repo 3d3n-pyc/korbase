@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import re
 from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from types import CoroutineType
@@ -34,6 +35,19 @@ _INTEGRITY = {
 }
 
 
+_ARGUMENT = re.compile(r"invalid input for query argument (\$\d+)")
+
+
+def _client_message(message: str) -> str:
+    """Return `message` without the user value asyncpg puts in its client-side input errors."""
+    found = _ARGUMENT.match(message)
+    if found:
+        return f"invalid value for query argument {found[1]}"
+    if message.startswith("invalid input in executemany()"):
+        return message.split(":", 1)[0]
+    return message
+
+
 def _translate(exc: Exception) -> DatabaseError | None:
     """Return the Korbase error for an asyncpg or network error, or `None` to leave it alone.
 
@@ -42,7 +56,7 @@ def _translate(exc: Exception) -> DatabaseError | None:
     """
     import asyncpg
 
-    message = str(exc.args[0]) if exc.args else str(exc)
+    message = _client_message(str(exc.args[0]) if exc.args else str(exc))
     if isinstance(exc, asyncpg.PostgresError):
         state = getattr(exc, "sqlstate", None) or ""
         constraint = getattr(exc, "constraint_name", None)
@@ -56,8 +70,10 @@ def _translate(exc: Exception) -> DatabaseError | None:
             return ConnectionFailed(message)
         return DatabaseError(message, constraint=constraint)
     if isinstance(exc, asyncpg.InterfaceError):
-        return ConnectionFailed(message) if "closed" in message else None
-    if isinstance(exc, (OSError, asyncio.TimeoutError)):
+        return ConnectionFailed(message) if "closed" in message else DatabaseError(message)
+    if isinstance(exc, asyncio.TimeoutError):
+        return ConnectionFailed("the operation timed out (command, connect or acquire timeout reached)")
+    if isinstance(exc, OSError):
         return ConnectionFailed(message)
     return None
 
