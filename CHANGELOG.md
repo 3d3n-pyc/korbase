@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Aggregates: `count()` and the column methods `.count()`, `.sum()`, `.avg()`, `.min()` and `.max()`, on Postgres and SQLite. `avg` is always a `float`, and `sum`, `min` and `max` are `None` when there are no rows. Values keep the column type, so dates and UUIDs are decoded on SQLite too. Postgres has no `min` or `max` on `uuid` columns.
+- `select(M).columns(*items)` returns tuples instead of models, with `.group_by(...)`, `.having(...)`, and `.desc()` on an aggregate in `order_by`. It raises `KorbaseError` for an empty `columns()`, a plain column that is not in `group_by` next to an aggregate, and `having` with no aggregate or `group_by`. `.load()` is not available on these queries.
+- `db.value(q)` (and `tx.value(q)`) returns the single value of a query with one column, or `None`: `n = await db.value(select(Task).columns(count()).where(done=False)) or 0`. `db.run` gives a list of tuples and `db.first` a tuple or `None`. No upgrade needed.
+
 ## 0.1.0a3
 
 Documentation release: no code change.

@@ -79,6 +79,26 @@ Also `.offset()`, `like`, `ilike`, `in_`, `is_not_null`, `.desc()`.
 clash. Guards: `update` and `delete` raise without `.where(...)` unless you
 call `.all_rows()`; `insert` and `upsert` need `.values(...)`.
 
+Counts, sums and groups: `select(M).columns(...)` returns tuples, and
+`db.value(q)` returns one value (or `None`). Aggregates are `count()` and
+`col.count()`, `.sum()`, `.avg()` (always a float), `.min()`, `.max()`.
+
+```python
+from korbase import count
+
+per_author = (
+    select(Book).columns(b.author_id, count())
+    .group_by(b.author_id).having(count() > 1).order_by(count().desc())
+)
+# await db.run(per_author)  ->  [(1, 3), (2, 2)]: list of tuples
+# await db.value(select(Book).columns(count()).where(author_id=1)) or 0  ->  3
+```
+
+A plain column next to an aggregate must be in `group_by`; `having` needs
+an aggregate or `group_by`; an empty `columns()` raises `KorbaseError`.
+`.load()` is not available here, and Postgres has no `min` or `max` on
+`uuid`.
+
 ## Running
 
 ```python
@@ -171,7 +191,7 @@ connection only) uses the standard library: nothing to install, SQLite
 - `migrate make` cannot alter a type, nullability, default or key in place:
   it writes a `-- korbase:review` block with `-- intended:`. Replace it with a
   table rebuild (new table, copy, drop, rename), see `docs/sqlite.md`.
-- Not in the builder yet: aggregates. Use raw SQL.
+- Aggregates, `columns` and `group_by` work the same as on Postgres.
 
 ## Common mistakes
 

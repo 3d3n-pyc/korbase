@@ -134,7 +134,7 @@ Why it looks like this:
 
 ## Going further
 
-- **Not in the builder yet.** Aggregates such as `count`, `sum` and `group by` are not in the query builder. Write them as raw SQL, in a migration file or with `db.fetch`. `make` proposes dropping an index that is not in the models, with a review marker, so move such an index into a model or delete that line.
+- **Aggregates work as on Postgres.** `count`, `sum`, `avg`, `min`, `max`, `group_by` and `having` are in the query builder (see [Queries](queries.md#aggregates-and-grouping)). Dates and UUIDs come back as Python values, though SQLite stores them as text. Raw SQL is only needed for what the builder does not cover. `make` proposes dropping an index that is not in the models, with a review marker, so move such an index into a model or delete that line.
 - **Decimals compare as text.** `ORDER BY amount` puts `'10.00'` before `'9.00'`, and `SUM(amount)` reads the text as floating point numbers. For money, sort and add in Python, or store whole cents in an `int` field.
 - **One thread per connection.** Each pooled connection owns a thread, so a slow query never blocks the event loop. A `Transaction` keeps its connection until the block ends, and when the pool is empty the next caller waits. With `size=1`, requests that use `kdb.transaction` run one after the other.
 - **Status tags.** `execute` returns Postgres-style tags (`INSERT 0 1`, `UPDATE 3`), so code that reads them works on both.

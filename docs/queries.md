@@ -71,6 +71,7 @@ changed = await db.run(update(User).set(age=37).where(id=1))   # int
 | Builder | `db.run()` gives | `db.first()` gives |
 |---|---|---|
 | `select`, `insert`, `upsert` | `list[User]` | `User \| None` |
+| `select(...).columns(...)` | `list[tuple]` | `tuple \| None` |
 | `update`, `delete` | `int`, the number of rows changed | not allowed |
 | `update` or `delete` with `.returning()` | `list[User]` | `User \| None` |
 
@@ -134,6 +135,107 @@ rows = await db.run(q)
 
 - `order_by()` takes `col.asc()`, `col.desc()` or a plain column (ascending).
 - `limit()` and `offset()` take an `int` or a `param(...)`.
+
+## Aggregates and grouping
+
+An aggregate turns many rows into one value: how many, the total, the
+average. Say you keep a to-do list, and you want the number of open tasks and
+their points for each list, biggest first:
+
+```python
+from korbase import cols, count, select
+
+T = cols(Task)
+
+per_list = (
+    select(Task)
+    .columns(T.list_id, count(), T.points.sum())
+    .where(done=False)
+    .group_by(T.list_id)
+    .having(count() > 1)
+    .order_by(count().desc())
+    .limit(3)
+)
+
+rows = await db.run(per_list)   # [(1, 3, 9)]: list 1 has 3 open tasks worth 9 points
+```
+
+This example uses a `Task` model with the fields `id`, `list_id`, `done` and
+`points`. On Postgres it sends this SQL:
+
+```sql
+SELECT "tasks"."list_id", count(*), sum("tasks"."points") FROM "tasks" WHERE "tasks"."done" = $1 GROUP BY "tasks"."list_id" HAVING count(*) > $2 ORDER BY count(*) DESC LIMIT $3
+```
+
+On SQLite the SQL is the same, with `?1`, `?2` and `?3` in place of `$1`,
+`$2` and `$3`.
+
+`columns()` replaces the whole row with the items you list, so each result
+is a tuple, in the order you gave. `group_by()` makes one row per value of the
+column. `having()` keeps only the groups that match, as `where()` keeps rows.
+`where()` runs first, on rows, and `having()` runs after, on groups.
+
+### The aggregates
+
+| Python | SQL | Result |
+|---|---|---|
+| `count()` | `count(*)` | `int`, the rows in the group |
+| `col.count()` | `count(col)` | `int`, the rows where `col` is not null |
+| `col.sum()` | `sum(col)` | the column type, or `None` |
+| `col.avg()` | `avg(col)` | always a `float`, or `None` |
+| `col.min()`, `col.max()` | `min(col)`, `max(col)` | the column type, or `None` |
+
+`sum`, `avg`, `min` and `max` give `None` when there is nothing to add up,
+and `count` gives `0`. Values come back as the column type, not as raw
+database values. `min()` of a `date` column is a `date`, also on SQLite,
+which stores dates as text. `avg` is a `float` on both databases: Postgres
+would otherwise return a `Decimal`, so Korbase casts it
+(`CAST(avg(col) AS DOUBLE PRECISION)`). SQLite already returns a float.
+
+An aggregate can go in `having()`, with `>`, `<`, `==` and the other
+operators, and in `order_by()`, with `.asc()` or `.desc()`.
+
+### One value
+
+`db.value()` runs a query that selects one column or aggregate, and returns
+that single value. It returns `None` when there is no row. A query with
+no `group_by()` always returns one row, so `count()` gives `0`, not `None`:
+
+```python
+open_tasks = await db.value(select(Task).columns(count()).where(done=False))
+best = await db.value(select(Task).columns(T.points.max()))   # int | None
+```
+
+For a `sum()` that you want as a number, write `... or 0`. For a `count()`
+you do not need it.
+
+With no `group_by()` and no row, `db.first()` still returns a tuple, for
+example `(0, None)`. With a `group_by()` and no row, there are no groups:
+`db.run()` returns `[]` and `db.first()` returns `None`.
+
+`db.value()` raises `KorbaseError` if the query does not select exactly one
+item.
+
+### What Korbase refuses
+
+These raise `KorbaseError` when the query is compiled, which happens the
+first time you run it:
+
+- `columns()` with nothing in it.
+- A plain column next to an aggregate, when the column is not in
+  `group_by()`. The database could not tell which value to show.
+- `having()` on a query with no aggregate and no `group_by()`.
+
+Two more limits:
+
+- `.load()` is not available on a `columns()` query. It has no rows of the
+  model to fill.
+- Postgres has no `min` or `max` for `uuid` columns, so `.min()` and `.max()`
+  on one fail in the database.
+
+The editor knows the type of each tuple for up to six items in `columns()`.
+Calling `columns()` again replaces the list, and clears `group_by()` and
+`having()`.
 
 ## Insert
 
