@@ -6,6 +6,7 @@ import asyncio
 import datetime as dt
 import uuid
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 from typing import Annotated
 
 import msgspec
@@ -27,6 +28,18 @@ class Item(msgspec.Struct):
 SETUP = """
 DROP TABLE IF EXISTS items;
 CREATE TABLE items (id int PRIMARY KEY, grp text NOT NULL, qty int NOT NULL, day date NOT NULL, ref uuid NOT NULL);
+"""
+
+
+@table("prices")
+class Price(msgspec.Struct):
+    id: Annotated[int, PK()]
+    amount: Decimal
+
+
+DEC_SETUP = """
+DROP TABLE IF EXISTS prices;
+CREATE TABLE prices (id int PRIMARY KEY, amount numeric(10, 2) NOT NULL);
 """
 U1, U2, U3 = (uuid.UUID(int=i) for i in (1, 2, 3))
 ROWS = [
@@ -82,6 +95,17 @@ def test_date_uuid_decode(backend_dsn: str) -> None:
         assert row == (dt.date(2024, 1, 1), dt.date(2024, 3, 1))
         assert await db.first(select(Item).columns(i.grp, i.ref).where(id=1)) == ("a", U2)
         assert await db.value(select(Item).columns(i.ref).where(id=3)) == U3
+
+    with_items(body, backend_dsn)
+
+
+def test_decimal_sum_is_exact(backend_dsn: str) -> None:
+    async def body(db: Database) -> None:
+        async with db._pool.acquire() as conn:
+            await conn.execute_script(DEC_SETUP)
+        for n, v in enumerate(("1.10", "2.25")):
+            await db.run(insert(Price).values(id=n, amount=Decimal(v)))
+        assert await db.value(select(Price).columns(cols(Price).amount.sum())) == Decimal("3.35")
 
     with_items(body, backend_dsn)
 

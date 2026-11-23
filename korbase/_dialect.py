@@ -105,7 +105,7 @@ def _sqlite_decode(tp: Any, raw: Any) -> Any:
     if base is uuid.UUID:
         return uuid.UUID(raw)
     if base is Decimal:
-        return Decimal(raw)
+        return Decimal(str(raw))
     if base in (dict, list):
         return json.loads(raw)
     if isinstance(base, type) and issubclass(base, enum.Enum):

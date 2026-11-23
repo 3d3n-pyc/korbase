@@ -136,6 +136,11 @@ A user with three posts is three rows, and a user with none is one row with
 `post` set to `None`. Korbase decides a model is missing when all of its
 primary key columns are `NULL`.
 
+With `.columns()` after a `left_join`, columns of the joined table can be
+`None` even though they are typed as the column type, because types cannot see
+the join side: `select(User).left_join(Post).columns(U.name, P.title)` types
+`title` as `str`, but it is `None` for a user with no post.
+
 ### Which columns are joined
 
 Without `on=`, Korbase uses the one foreign key between the two tables, in

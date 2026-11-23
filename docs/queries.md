@@ -231,7 +231,10 @@ Two more limits:
 - `.load()` is not available on a `columns()` query. It has no rows of the
   model to fill.
 - Postgres has no `min` or `max` for `uuid` columns, so `.min()` and `.max()`
-  on one fail in the database.
+  on one fail in the database. It has none for `bool` columns either
+  (SQLite has).
+- SQLite sums `Decimal` columns as floating point, so round the result if you
+  need an exact amount.
 
 Aggregates also work over a join: see [Joins](relations.md#joins).
 
