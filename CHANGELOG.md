@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed (breaking)
+
+- Errors from the database are now korbase exceptions, the same on Postgres and SQLite, where they used to be the driver's own (`asyncpg.UniqueViolationError`, `sqlite3.IntegrityError`, `sqlite3.OperationalError`). To update: catch `korbase.UniqueViolation`, `ForeignKeyViolation`, `NotNullViolation`, `CheckViolation` (or their parent `IntegrityError`), `DatabaseBusy` and `ConnectionFailed` instead of the driver classes. The original error stays on `__cause__`. The message holds no row values, so a code that read them from `str(error)` must read `__cause__` (and not show it to users). See `docs/errors.md`.
+
 ### Added
 
 - Bulk insert: `insert(M).rows([{...}, {...}])` and `upsert(M).rows([...]).on_conflict("id")` write many rows in one statement and return them in input order, with server defaults filled. Each dict takes the keys of `.values(**kw)`; every row needs the same keys; `.rows()` and `.values()` replace each other. `KorbaseError` for an empty list, different keys, an unknown column, more than 32766 bound values (split into batches), and an upsert with the same conflict key twice. No upgrade needed.
@@ -9,6 +13,13 @@
 - `select(M).columns(*items)` returns tuples instead of models, with `.group_by(...)`, `.having(...)`, and `.desc()` on an aggregate in `order_by`. It raises `KorbaseError` for an empty `columns()`, a plain column that is not in `group_by` next to an aggregate, and `having` with no aggregate or `group_by`. `.load()` is not available on these queries.
 - `db.value(q)` (and `tx.value(q)`) returns the single value of a query with one column, or `None`: `n = await db.value(select(Task).columns(count()).where(done=False)) or 0`. `db.run` gives a list of tuples and `db.first` a tuple or `None`. No upgrade needed.
 - Joins: `select(A).join(B)` and `.left_join(B)` return tuples of models, `tuple[A, B]`, and `B | None` for a left join with no match (all its primary key columns are NULL). Without `on=`, the one foreign key between the tables is used, in either direction; otherwise pass `on=cols(A).x == cols(B).y`. At most two joins. `where`, `order_by`, `.columns()` and `group_by` accept columns of any joined table, and keyword filters refer to the first model. `run` and `first` work, `value` does not. `KorbaseError` for no foreign key or several without `on=`, the same table twice, a third join, and `.load()` with a join. No upgrade needed.
+- `korbase.KorbaseError` (already raised for misuse) now has a database branch: `DatabaseError`, with `IntegrityError` (`UniqueViolation`, `ForeignKeyViolation`, `NotNullViolation`, `CheckViolation`), `DatabaseBusy` and `ConnectionFailed`. `.constraint` gives the constraint name on Postgres, and `table.column` text or `None` on SQLite.
+- `DatabaseBusy` marks a failure that a retry of the transaction can fix: a SQLite lock after `busy_timeout_ms`, a Postgres lock not available, or a deadlock.
+- A guide page, `docs/errors.md`, and a section in the agent skill.
+
+### Changed
+
+- On SQLite, `make` writes the full table rebuild for a change SQLite cannot `ALTER` (type, nullability, default, primary key, unique constraint, foreign key), where it used to write a review block to fill in by hand. The file starts with `-- korbase:no-transaction`, runs with `PRAGMA foreign_keys=OFF` inside `BEGIN IMMEDIATE ... COMMIT`, and ends with `PRAGMA foreign_key_check`. A `-- korbase:review` line stays where data can be lost (type change copied with `CAST`, `NULL` to `NOT NULL`, dropped column, new `NOT NULL` column without a default). `apply` fails and rolls back when `foreign_key_check` finds broken rows, always turns foreign keys back on, and records nothing on failure. To update: nothing; files written by earlier versions still apply.
 
 ## 0.1.0a3
 

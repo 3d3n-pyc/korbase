@@ -155,6 +155,24 @@ Raw SQL: `await db.fetch("SELECT ... WHERE x = $1", 5, model=Book)` maps
 columns to the model by name; without `model` rows are tuples. Always pass
 values as `$1` arguments, never format them into the string.
 
+## Errors
+
+Database errors are korbase exceptions on both backends; the driver's error
+is on `__cause__`. Never show `__cause__` to users: it can hold row values.
+
+```python
+from korbase import DatabaseBusy, UniqueViolation
+
+try:
+    await db.run(insert(User).values(id=1, name="Ann"))
+except UniqueViolation as err:   # also ForeignKeyViolation, NotNullViolation,
+    print(err.constraint)        # CheckViolation; parent: IntegrityError
+```
+
+`DatabaseBusy` (SQLite lock after `busy_timeout_ms`, Postgres lock not
+available, deadlock): retry the whole `db.transaction()` block, a few times
+with a growing sleep. See `docs/errors.md`.
+
 ## Migrations
 
 `create_all(db, models)` (from `korbase.migrate`) creates tables: use it in
@@ -207,10 +225,13 @@ connection only) uses the standard library: nothing to install, SQLite
   text for dict and list. Pass `model=` to get Python types back.
 - `ilike` ignores case for ASCII letters only. One writer at a time:
   `db.transaction()` is `BEGIN IMMEDIATE`; a busy file raises
-  `sqlite3.OperationalError: database is locked` after `busy_timeout_ms`.
-- `migrate make` cannot alter a type, nullability, default or key in place:
-  it writes a `-- korbase:review` block with `-- intended:`. Replace it with a
-  table rebuild (new table, copy, drop, rename), see `docs/sqlite.md`.
+  `korbase.DatabaseBusy` after `busy_timeout_ms` (retry the transaction).
+- `migrate make` writes the full table rebuild when SQLite cannot alter a
+  type, nullability, default or key in place (file starts with
+  `-- korbase:no-transaction`). A `-- korbase:review` line stays where data can
+  be lost: check with a `SELECT` (`CAST` turns bad text into 0), then delete
+  it. `apply` rolls back and records nothing if `foreign_key_check` fails.
+  See `docs/sqlite.md`.
 - Aggregates, `columns` and `group_by` work the same as on Postgres.
 
 ## Common mistakes

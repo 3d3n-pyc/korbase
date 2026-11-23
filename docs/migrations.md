@@ -128,6 +128,8 @@ A statement that can lose data or fail on existing rows gets a `-- korbase:revie
 2. Change the SQL if it is wrong.
 3. Delete the `-- korbase:review` lines.
 
+On SQLite, `make` also writes table rebuilds for changes SQLite cannot `ALTER`. A rebuild carries a review line only when the copy can lose data: a type change (copied with `CAST`), a column that becomes `NOT NULL`, a dropped column, or a new `NOT NULL` column without a default. Before you delete the line, check the data with a `SELECT`: `CAST` turns text that is not a clean number into `0` or another number and does not fail. See [Table rebuilds](sqlite.md#table-rebuilds).
+
 Then run `apply` again. If a file fails half way, its changes are rolled back and the error names the file. Files before it stay applied. Fix the file or the database, then run `apply` again.
 
 ## Tests
@@ -190,6 +192,8 @@ CREATE INDEX CONCURRENTLY "items_title_idx" ON "items" ("title");
 ```
 
 The marker must be the very first line, so move it above the header that `make` writes, or delete the header. Put one statement in such a file. A file is sent as one multi-statement text, and Postgres treats that as one transaction, so a second statement next to `CONCURRENTLY` fails with `cannot run inside a transaction block`. Without a transaction, a failed file is not rolled back, so check the database by hand.
+
+On SQLite the marker has a second use. A table rebuild must run with `PRAGMA foreign_keys=OFF`, which has no effect inside a transaction, so `make` writes `-- korbase:no-transaction` as line 1 of such a file and opens its own `BEGIN IMMEDIATE`. You do not add it yourself. If the file fails, `apply` rolls it back and records nothing. See [Table rebuilds](sqlite.md#table-rebuilds).
 
 **`standard_conforming_strings` is forced on.** `apply` sets it to `on` for its own session, whatever the role's default, then restores it. A backslash in a string literal is therefore read the same way in every file. `make` writes `SET standard_conforming_strings = on;` at the top of its files for the same reason.
 

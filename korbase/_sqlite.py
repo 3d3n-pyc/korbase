@@ -12,6 +12,16 @@ from typing import Any, TypeVar
 
 from korbase._backend import M, Pool, RowBuilder
 from korbase._dialect import SQLITE
+from korbase._errors import (
+    CheckViolation,
+    ConnectionFailed,
+    DatabaseBusy,
+    DatabaseError,
+    ForeignKeyViolation,
+    IntegrityError,
+    NotNullViolation,
+    UniqueViolation,
+)
 from korbase._ident import KorbaseError
 
 __all__ = ["SqliteBackend"]
@@ -66,6 +76,35 @@ def _split_statements(sql: str) -> list[str]:
     return statements
 
 
+_VIOLATIONS: tuple[tuple[str, type[IntegrityError]], ...] = (
+    ("UNIQUE constraint failed", UniqueViolation),
+    ("FOREIGN KEY constraint failed", ForeignKeyViolation),
+    ("NOT NULL constraint failed", NotNullViolation),
+    ("CHECK constraint failed", CheckViolation),
+)
+_BUSY = ("database is locked", "database table is locked")
+
+
+def _translate(exc: sqlite3.Error) -> DatabaseError:
+    """Turn a sqlite3 error into the matching Korbase error.
+
+    The message prefix is used on every Python version: SQLite words its
+    constraint messages the same way for all of them.
+    """
+    message = str(exc)
+    if isinstance(exc, sqlite3.IntegrityError):
+        for prefix, cls in _VIOLATIONS:
+            if message.startswith(prefix):
+                column = message[len(prefix) + 2 :] if cls in (UniqueViolation, NotNullViolation) else ""
+                return cls(message, constraint=column or None)
+        return IntegrityError(message)
+    if message in _BUSY:
+        return DatabaseBusy(message)
+    if message == "unable to open database file":
+        return ConnectionFailed(message)
+    return DatabaseError(message)
+
+
 def _encode(args: Sequence[object]) -> tuple[Any, ...]:
     """Convert every argument to what SQLite stores."""
     return tuple(SQLITE.encode_param(a) for a in args)
@@ -87,6 +126,8 @@ class _SqliteConn:
         fut = asyncio.get_running_loop().run_in_executor(self._executor, fn)
         try:
             return await asyncio.shield(fut)
+        except sqlite3.Error as exc:
+            raise _translate(exc) from exc
         except asyncio.CancelledError:
             await self._settle(fut)
             await self.reset()
