@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- On SQLite, `make` writes the full table rebuild for a change SQLite cannot `ALTER` (type, nullability, default, primary key, unique constraint, foreign key), where it used to write a review block to fill in by hand. The file starts with `-- korbase:no-transaction`, runs with `PRAGMA foreign_keys=OFF` inside `BEGIN IMMEDIATE ... COMMIT`, and ends with `PRAGMA foreign_key_check`. A `-- korbase:review` line stays where data can be lost (type change copied with `CAST`, `NULL` to `NOT NULL`, dropped column, new `NOT NULL` column without a default). `apply` fails and rolls back when `foreign_key_check` finds broken rows, always turns foreign keys back on, and records nothing on failure. To update: nothing; files written by earlier versions still apply.
+
 ## 0.1.0a3
 
 Documentation release: no code change.

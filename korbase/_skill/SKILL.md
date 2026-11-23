@@ -168,9 +168,12 @@ connection only) uses the standard library: nothing to install, SQLite
 - `ilike` ignores case for ASCII letters only. One writer at a time:
   `db.transaction()` is `BEGIN IMMEDIATE`; a busy file raises
   `sqlite3.OperationalError: database is locked` after `busy_timeout_ms`.
-- `migrate make` cannot alter a type, nullability, default or key in place:
-  it writes a `-- korbase:review` block with `-- intended:`. Replace it with a
-  table rebuild (new table, copy, drop, rename), see `docs/sqlite.md`.
+- `migrate make` writes the full table rebuild when SQLite cannot alter a
+  type, nullability, default or key in place (file starts with
+  `-- korbase:no-transaction`). A `-- korbase:review` line stays where data can
+  be lost: check with a `SELECT` (`CAST` turns bad text into 0), then delete
+  it. `apply` rolls back and records nothing if `foreign_key_check` fails.
+  See `docs/sqlite.md`.
 - Not in the builder yet: aggregates. Use raw SQL.
 
 ## Common mistakes
