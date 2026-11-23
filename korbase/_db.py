@@ -184,7 +184,7 @@ class _Runner:
 
             n = await db.value(select(Task).columns(count()).where(done=False)) or 0
         """
-        if len(query._columns) != 1:
+        if not isinstance(query, SelectColumns) or len(query._columns) != 1:
             raise KorbaseError("value() needs a query with exactly one column or aggregate")
         row = await self.first(query, **params)
         return None if row is None else row[0]

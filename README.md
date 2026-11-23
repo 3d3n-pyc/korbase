@@ -81,8 +81,7 @@ Working today: models, queries, transactions, relations loaded with
 SQL migrations with `python -m korbase.migrate`. SQLite works through the
 standard library, with a `sqlite:///app.db` DSN: see [`docs/sqlite.md`](docs/sqlite.md).
 
-Not yet: joins in the query builder, and the korpg driver (its
-extra is empty). `.load()` raises `KorbaseError` on tables with a composite
+Not yet: the korpg driver (its extra is empty). `.load()` raises `KorbaseError` on tables with a composite
 primary key.
 
 ## Tests
