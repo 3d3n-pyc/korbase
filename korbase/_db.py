@@ -7,7 +7,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, Optional, TypeVar, Union, overload
 
 from korbase._backend import Backend, Conn, Pool
-from korbase._build import decoding_rows, named_builder, positional_builder, validating_builder
+from korbase._build import decoding_rows, named_builder, positional_builder, tuple_builder, validating_builder
 from korbase._dialect import PG, Dialect
 from korbase._expr import Param
 from korbase._ident import KorbaseError
@@ -17,6 +17,7 @@ from korbase._query import (
     DeleteReturning,
     Insert,
     Select,
+    SelectColumns,
     Update,
     UpdateReturning,
     Upsert,
@@ -57,6 +58,8 @@ def _reject_null_eq(compiled: Compiled, params: dict[str, Any]) -> None:
 
 def _row_builder(query: _Query[Any], validate: bool, dialect: Dialect) -> Any:
     """Return the row builder for the columns of the query's model."""
+    if isinstance(query, SelectColumns):
+        return tuple_builder(query._columns, query.compile(dialect).outputs, dialect)
     if validate:
         return validating_builder(query._meta, dialect)
     return positional_builder(query._meta, dialect)
@@ -108,6 +111,9 @@ class _Runner:
         raise NotImplementedError
 
     @overload
+    async def run(self, query: SelectColumns[M], /, **params: Any) -> list[M]: ...
+
+    @overload
     async def run(self, query: Rows[M], /, **params: Any) -> list[M]: ...
 
     @overload
@@ -134,8 +140,14 @@ class _Runner:
         """Load the relations of `query` into `rows`, decoding children by dialect."""
         await load_relations(conn, rows, query._loads, self._validate, self._dialect)
 
-    async def first(self, query: Rows[M], /, **params: Any) -> Optional[M]:
-        """Run a query that returns rows and return the first model, or `None`.
+    @overload
+    async def first(self, query: SelectColumns[M], /, **params: Any) -> Optional[M]: ...
+
+    @overload
+    async def first(self, query: Rows[M], /, **params: Any) -> Optional[M]: ...
+
+    async def first(self, query: Any, /, **params: Any) -> Any:
+        """Run a query that returns rows and return the first model (or tuple), or `None`.
 
         Other updates and deletes raise `KorbaseError`: add `.returning()`.
         """
@@ -148,6 +160,18 @@ class _Runner:
             if row is not None and isinstance(query, Select):
                 await self._load(conn, [row], query)
             return row
+
+    async def value(self, query: SelectColumns[tuple[M]], /, **params: Any) -> Optional[M]:
+        """Return the first column of the first row, or `None` when there is no row.
+
+        The query must select exactly one column or aggregate::
+
+            n = await db.value(select(Task).columns(count()).where(done=False)) or 0
+        """
+        if len(query._columns) != 1:
+            raise KorbaseError("value() needs a query with exactly one column or aggregate")
+        row = await self.first(query, **params)
+        return None if row is None else row[0]
 
     @overload
     async def fetch(self, sql: str, *args: Any, model: type[M]) -> list[M]: ...

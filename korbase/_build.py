@@ -13,7 +13,7 @@ from korbase._dialect import PG, Dialect, _strip_optional
 from korbase._ident import KorbaseError
 from korbase._meta import TableMeta, table_meta
 
-__all__ = ["positional_builder", "named_builder", "validating_builder"]
+__all__ = ["positional_builder", "named_builder", "validating_builder", "tuple_builder"]
 
 _NAMED: dict[tuple[type, tuple[str, ...], str], RowBuilder[Any]] = {}
 _PLAIN = (int, float, str, bytes)
@@ -187,3 +187,44 @@ def validating_builder(meta: TableMeta, dialect: Optional[Dialect] = None) -> Ro
         return msgspec.convert(dict(zip(names, row, strict=True)), model, from_attributes=True)
 
     return build if dialect is PG else _decoding(build, _decoders(meta, names, dialect))
+
+
+def _to_float(raw: Any) -> Any:
+    """Return `raw` as a float, keeping `None`."""
+    return None if raw is None else float(raw)
+
+
+def _to_int(raw: Any) -> Any:
+    """Return `raw` as an int, keeping `None`."""
+    return None if raw is None else int(raw)
+
+
+def _item_decoder(item: Any, column: Any, dialect: Dialect) -> Any:
+    """Return the function that decodes one selected item, or None to keep the value."""
+    if getattr(item, "kind", None) == "avg":
+        return _to_float
+    if column is None:
+        return None
+    tp = _strip_optional(next(c.python_type for c in column.table.columns if c.name == column.name))
+    if tp is int:
+        return _to_int
+    if tp in _PLAIN or dialect is PG:
+        return None
+    return partial(dialect.decode_value, tp)
+
+
+def tuple_builder(items: Sequence[Any], outputs: Sequence[Any], dialect: Dialect) -> RowBuilder[Any]:
+    """Return a builder turning a row of selected columns and aggregates into a typed tuple."""
+    fns = [_item_decoder(i, c, dialect) for i, c in zip(items, outputs, strict=True)]
+    if not any(fns):
+        return tuple
+    pairs = [(i, fn) for i, fn in enumerate(fns) if fn is not None]
+
+    def build(row: Sequence[Any]) -> tuple[Any, ...]:
+        """Decode one row into a tuple."""
+        values = list(row)
+        for i, fn in pairs:
+            values[i] = fn(values[i])
+        return tuple(values)
+
+    return build
