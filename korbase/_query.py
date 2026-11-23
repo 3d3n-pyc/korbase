@@ -19,6 +19,7 @@ from korbase._expr import (
     compile_expr,
 )
 from korbase._ident import KorbaseError, quote_ident
+from korbase._join import Join, JoinPart, check_tables, from_sql, make_join, parts_of, select_names, table_names
 from korbase._meta import TableMeta, table_meta
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "Compiled",
     "Select",
     "SelectColumns",
+    "SelectJoin",
     "Insert",
     "Upsert",
     "Update",
@@ -48,6 +50,9 @@ X3 = TypeVar("X3")
 X4 = TypeVar("X4")
 X5 = TypeVar("X5")
 X6 = TypeVar("X6")
+JA = TypeVar("JA")
+JB = TypeVar("JB")
+JC = TypeVar("JC")
 
 Slot = Union[Param, Value]
 
@@ -58,11 +63,13 @@ class Compiled:
 
     `outputs` is set for column queries: one entry per selected item, the
     source column to decode the value with, or `None` for `count` and `avg`.
+    `parts` is set for whole-row joins: one `JoinPart` per model in the row.
     """
 
     sql: str
     slots: tuple[Slot, ...]
     outputs: tuple[Optional[Column[Any]], ...] = ()
+    parts: tuple[JoinPart, ...] = ()
 
 
 class _Query(Generic[M]):
@@ -207,6 +214,7 @@ class _Ordered(_Filtered[M]):
         self._orders: tuple[Order, ...] = ()
         self._limit: Optional[Slot] = None
         self._offset: Optional[Slot] = None
+        self._joins: tuple[Join, ...] = ()
 
     def limit(self: _Q, value: Union[Param, int]) -> _Q:
         """Return at most `value` rows."""
@@ -274,11 +282,74 @@ class Select(_Ordered[M]):
         """Remember relations to load along with the rows."""
         return self._replace(_loads=self._loads + relations)
 
+    def join(self, model: type[X1], on: Optional[Expr] = None) -> SelectJoin[tuple[M, X1]]:
+        """Join another table (`JOIN`); rows become tuples of models.
+
+        Without `on`, the one foreign key between the tables is used.
+        """
+        return _start_join(self, model, False, on)
+
+    def left_join(self, model: type[X1], on: Optional[Expr] = None) -> SelectJoin[tuple[M, Optional[X1]]]:
+        """Join another table (`LEFT JOIN`); its model is `None` when nothing matches."""
+        return _start_join(self, model, True, on)
+
     def _build(self, ctx: ParamCollector) -> str:
         """Return the `SELECT` statement."""
         t = self._table()
         names = ", ".join(f"{t}.{quote_ident(c.name)}" for c in self._meta.columns)
         return _finish(self, f"SELECT {names} FROM {t}", ctx)
+
+
+def _start_join(query: Any, model: type[Any], left: bool, on: Any) -> Any:
+    """Turn a `Select` into a `SelectJoin` with its first join."""
+    if query._loads:
+        raise KorbaseError("load() cannot be combined with a join")
+    new = query._become(SelectJoin)
+    return new._add_join(model, left, on)
+
+
+class SelectJoin(_Ordered[Any], Generic[R]):
+    """A `SELECT` over joined tables; runs as tuples of models of type `R`."""
+
+    def order_by(self, *orders: Union[Column[Any], Order]) -> SelectJoin[R]:
+        """Sort rows, using `col.asc()` or `col.desc()`."""
+        _check_orders(orders, (Column, Order))
+        return self._replace(_orders=self._orders + tuple(orders))
+
+    def _add_join(self, model: type[Any], left: bool, on: Any) -> Any:
+        """Return a copy with one more join."""
+        join = make_join(self._meta, self._joins, table_meta(model), left, on)
+        return self._replace(_joins=self._joins + (join,))
+
+    def join(
+        self: SelectJoin[tuple[JA, JB]], model: type[JC], on: Optional[Expr] = None
+    ) -> SelectJoin[tuple[JA, JB, JC]]:
+        """Join a third table (`JOIN`); at most two joins are allowed."""
+        return self._add_join(model, False, on)
+
+    def left_join(
+        self: SelectJoin[tuple[JA, JB]], model: type[JC], on: Optional[Expr] = None
+    ) -> SelectJoin[tuple[JA, JB, Optional[JC]]]:
+        """Join a third table (`LEFT JOIN`); at most two joins are allowed."""
+        return self._add_join(model, True, on)
+
+    def _build(self, ctx: ParamCollector) -> str:
+        """Return the `SELECT` statement."""
+        check_query(self)
+        sql = f"SELECT {select_names(self._meta, self._joins)} FROM {from_sql(self._meta, self._joins, ctx)}"
+        return _finish(self, sql, ctx)
+
+    def _compile_for(self, dialect: Dialect) -> Compiled:
+        """Build the `Compiled` of this query, with the slice of each model."""
+        done = super()._compile_for(dialect)
+        return Compiled(done.sql, done.slots, (), parts_of(self._meta, self._joins))
+
+
+def check_query(query: Any) -> None:
+    """Raise `KorbaseError` if filters or orders use a table that is not in the query."""
+    nodes = [n for n in (query._where, getattr(query, "_having", None)) if n is not None]
+    nodes += list(getattr(query, "_columns", ())) + list(query._orders)
+    check_tables(nodes, table_names(query._meta, query._joins))
 
 
 def _finish(query: Any, sql: str, ctx: ParamCollector, middle: Any = None) -> str:
@@ -330,7 +401,7 @@ class SelectColumns(_Ordered[Any], Generic[R]):
         if not self._columns:
             raise KorbaseError("columns() needs at least one column or aggregate")
         for item in self._columns + self._group:
-            if isinstance(item, Column) and item.table.name != self._meta.name:
+            if isinstance(item, Column) and item.table.name not in table_names(self._meta, self._joins):
                 raise KorbaseError(f"column {item.name!r} is not a column of {self._meta.name!r}")
         plain = [c for c in self._columns if isinstance(c, Column)]
         grouped = {(c.table.name, c.name) for c in self._group}
@@ -356,8 +427,9 @@ class SelectColumns(_Ordered[Any], Generic[R]):
     def _build(self, ctx: ParamCollector) -> str:
         """Return the `SELECT` statement."""
         self._validate()
+        check_query(self)
         names = ", ".join(compile_expr(c, ctx) for c in self._columns)
-        sql = f"SELECT {names} FROM {self._table()}"
+        sql = f"SELECT {names} FROM {from_sql(self._meta, self._joins, ctx)}"
         return _finish(self, sql, ctx, lambda: self._group_sql(ctx) + self._having_sql(ctx))
 
     def _compile_for(self, dialect: Dialect) -> Compiled:
