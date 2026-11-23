@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changed (breaking)
+
+- Errors from the database are now korbase exceptions, the same on Postgres and SQLite, where they used to be the driver's own (`asyncpg.UniqueViolationError`, `sqlite3.IntegrityError`, `sqlite3.OperationalError`). To update: catch `korbase.UniqueViolation`, `ForeignKeyViolation`, `NotNullViolation`, `CheckViolation` (or their parent `IntegrityError`), `DatabaseBusy` and `ConnectionFailed` instead of the driver classes. The original error stays on `__cause__`. The message holds no row values, so a code that read them from `str(error)` must read `__cause__` (and not show it to users). See `docs/errors.md`.
+
+### Added
+
+- `korbase.KorbaseError` (already raised for misuse) now has a database branch: `DatabaseError`, with `IntegrityError` (`UniqueViolation`, `ForeignKeyViolation`, `NotNullViolation`, `CheckViolation`), `DatabaseBusy` and `ConnectionFailed`. `.constraint` gives the constraint name on Postgres, and `table.column` text or `None` on SQLite.
+- `DatabaseBusy` marks a failure that a retry of the transaction can fix: a SQLite lock after `busy_timeout_ms`, a Postgres lock not available, or a deadlock.
+- A guide page, `docs/errors.md`, and a section in the agent skill.
+
 ## 0.1.0a3
 
 Documentation release: no code change.
