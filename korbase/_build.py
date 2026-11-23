@@ -13,7 +13,7 @@ from korbase._dialect import PG, Dialect, _strip_optional
 from korbase._ident import KorbaseError
 from korbase._meta import TableMeta, table_meta
 
-__all__ = ["positional_builder", "named_builder", "validating_builder", "tuple_builder"]
+__all__ = ["positional_builder", "named_builder", "validating_builder", "tuple_builder", "join_builder"]
 
 _NAMED: dict[tuple[type, tuple[str, ...], str], RowBuilder[Any]] = {}
 _PLAIN = (int, float, str, bytes)
@@ -228,3 +228,27 @@ def tuple_builder(items: Sequence[Any], outputs: Sequence[Any], dialect: Dialect
         return tuple(values)
 
     return build
+
+
+def _part_builder(part: Any, validate: bool, dialect: Dialect) -> Any:
+    """Return `build(row)` making one model (or `None` for an unmatched left join) from a joined row."""
+    meta = part.meta
+    make = validating_builder(meta, dialect) if validate else positional_builder(meta, dialect)
+    start, stop = part.start, part.stop
+    pk = [start + i for i, c in enumerate(meta.columns) if c.pk]
+    if not part.left:
+        return lambda row: make(row[start:stop])
+
+    def build(row: Sequence[Any]) -> Any:
+        """Build the model, or `None` when all its primary-key columns are NULL."""
+        if all(row[i] is None for i in pk):
+            return None
+        return make(row[start:stop])
+
+    return build
+
+
+def join_builder(parts: Sequence[Any], validate: bool, dialect: Dialect) -> RowBuilder[Any]:
+    """Return a builder turning a joined row into a tuple of models, one per `JoinPart`."""
+    builders = [_part_builder(p, validate, dialect) for p in parts]
+    return lambda row: tuple(b(row) for b in builders)

@@ -7,7 +7,14 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import Any, Optional, TypeVar, Union, overload
 
 from korbase._backend import Backend, Conn, Pool
-from korbase._build import decoding_rows, named_builder, positional_builder, tuple_builder, validating_builder
+from korbase._build import (
+    decoding_rows,
+    join_builder,
+    named_builder,
+    positional_builder,
+    tuple_builder,
+    validating_builder,
+)
 from korbase._dialect import PG, Dialect
 from korbase._expr import Param
 from korbase._ident import KorbaseError
@@ -18,6 +25,7 @@ from korbase._query import (
     Insert,
     Select,
     SelectColumns,
+    SelectJoin,
     Update,
     UpdateReturning,
     Upsert,
@@ -60,6 +68,8 @@ def _row_builder(query: _Query[Any], validate: bool, dialect: Dialect) -> Any:
     """Return the row builder for the columns of the query's model."""
     if isinstance(query, SelectColumns):
         return tuple_builder(query._columns, query.compile(dialect).outputs, dialect)
+    if isinstance(query, SelectJoin):
+        return join_builder(query.compile(dialect).parts, validate, dialect)
     if validate:
         return validating_builder(query._meta, dialect)
     return positional_builder(query._meta, dialect)
@@ -114,6 +124,9 @@ class _Runner:
     async def run(self, query: SelectColumns[M], /, **params: Any) -> list[M]: ...
 
     @overload
+    async def run(self, query: SelectJoin[M], /, **params: Any) -> list[M]: ...
+
+    @overload
     async def run(self, query: Rows[M], /, **params: Any) -> list[M]: ...
 
     @overload
@@ -142,6 +155,9 @@ class _Runner:
 
     @overload
     async def first(self, query: SelectColumns[M], /, **params: Any) -> Optional[M]: ...
+
+    @overload
+    async def first(self, query: SelectJoin[M], /, **params: Any) -> Optional[M]: ...
 
     @overload
     async def first(self, query: Rows[M], /, **params: Any) -> Optional[M]: ...
