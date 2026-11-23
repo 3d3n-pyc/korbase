@@ -77,7 +77,9 @@ if the file is stale. Keyword filters `.where(title=...)` are runtime only.
 Also `.offset()`, `like`, `ilike`, `in_`, `is_not_null`, `.desc()`.
 `upsert(M).on_conflict("col").values(...)` updates the other columns on a
 clash. Guards: `update` and `delete` raise without `.where(...)` unless you
-call `.all_rows()`; `insert` and `upsert` need `.values(...)`.
+call `.all_rows()`; `insert` and `upsert` need `.values(...)` or `.rows(...)`.
+`.rows([{"a": 1}, {"a": 2}])` writes many rows in one statement, in order;
+every dict has the same keys, at most 32766 values per call.
 
 Counts, sums and groups: `select(M).columns(...)` returns tuples, and
 `db.value(q)` returns one value (or `None`). Aggregates are `count()` and

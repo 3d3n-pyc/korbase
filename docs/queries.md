@@ -251,6 +251,50 @@ Calling `columns()` again replaces the list, and clears `group_by()` and
   `db.run()` gives a list with one row, and `[user] =` takes it out of the
   list. `db.first()` gives the row directly.
 
+### Insert many rows
+
+To write several rows at once, pass a list of dicts to `rows()`. Korbase
+sends one statement, not one per row.
+
+```python
+users = await db.run(insert(User).rows([
+    {"name": "Ada", "age": 36},
+    {"name": "Alan", "age": 41},
+]))
+# [User(id=1, name='Ada', age=36), User(id=2, name='Alan', age=41)]
+```
+
+Each dict uses the same keys as `values()`. A column left out of every dict
+gets its default. The rows come back in the order you gave them, with the
+values the database chose (such as `id`).
+
+The SQL for these two rows:
+
+```sql
+-- Postgres
+INSERT INTO "users" ("name", "age") VALUES ($1, $2), ($3, $4) RETURNING "id", "name", "age"
+-- SQLite
+INSERT INTO "users" ("name", "age") VALUES (?1, ?2), (?3, ?4) RETURNING "id", "name", "age"
+```
+
+Korbase raises `KorbaseError` when:
+
+- the list is empty;
+- the dicts do not all have the same keys (a column cannot be set for one
+  row and left to its default for another: use two inserts);
+- a key is not a column of the model;
+- the statement would bind more than 32766 values (rows times columns).
+  Split the list into batches:
+
+```python
+rows = [{"name": f"user{i}", "age": i} for i in range(20_000)]
+for start in range(0, len(rows), 5_000):
+    await db.run(insert(User).rows(rows[start : start + 5_000]))
+```
+
+`rows()` and `values()` replace each other: the last one you call wins.
+`rows()` also works on `upsert`, see below.
+
 ## Update and delete
 
 ```python
@@ -282,6 +326,28 @@ insert, it always returns the written row.
 - The columns in the `SET` list are the inserted columns, minus the conflict
   columns and the primary key. The primary key is never rewritten.
 - If nothing is left to set, the upsert does nothing on conflict (`DO NOTHING`).
+
+To upsert many rows in one statement, use `rows()` as in
+[Insert many rows](#insert-many-rows):
+
+```python
+users = await db.run(
+    upsert(User)
+    .rows([{"id": 1, "name": "Ada", "age": 37}, {"id": 2, "name": "Alan", "age": 42}])
+    .on_conflict("id")
+)
+```
+
+```sql
+-- Postgres
+INSERT INTO "users" ("id", "name", "age") VALUES ($1, $2, $3), ($4, $5, $6) ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name", "age" = EXCLUDED."age" RETURNING "id", "name", "age"
+-- SQLite
+INSERT INTO "users" ("id", "name", "age") VALUES (?1, ?2, ?3), (?4, ?5, ?6) ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name", "age" = EXCLUDED."age" RETURNING "id", "name", "age"
+```
+
+The same rules apply. One more: two rows with the same conflict key (here,
+the same `id`) raise `KorbaseError`, because the database could not tell
+which one should win.
 
 ## Typed columns
 
