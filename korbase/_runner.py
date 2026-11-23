@@ -11,7 +11,7 @@ from pathlib import Path
 from korbase._backend import Conn
 from korbase._db import Database
 from korbase._dialect import PG, SQLITE, Dialect
-from korbase._ident import KorbaseError
+from korbase._errors import DatabaseError, KorbaseError
 
 __all__ = ["apply", "status"]
 
@@ -157,6 +157,8 @@ async def _run_file(conn: Conn, f: _File, dialect: Dialect) -> bool:
             return await _body(conn, f, dialect)
         async with conn.transaction():
             return await _body(conn, f, dialect)
+    except DatabaseError as exc:
+        raise type(exc)(f"migration {f.name} failed: {exc}", constraint=exc.constraint) from exc
     except KorbaseError:
         raise
     except Exception as exc:
