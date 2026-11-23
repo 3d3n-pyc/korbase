@@ -21,10 +21,12 @@ __all__ = [
     "Or",
     "Not",
     "Order",
+    "Aggregate",
     "RelRef",
     "Cols",
     "ParamCollector",
     "param",
+    "count",
     "cols",
     "compile_expr",
 ]
@@ -133,11 +135,11 @@ def _sql(node: Any, ctx: ParamCollector, eq: bool = False) -> str:
 
 
 class Order:
-    """A column with a sort direction."""
+    """A column or aggregate with a sort direction."""
 
     __slots__ = ("column", "desc")
 
-    def __init__(self, column: Column[Any], desc: bool) -> None:
+    def __init__(self, column: Expr, desc: bool) -> None:
         """Sort by `column`, descending if `desc`."""
         self.column = column
         self.desc = desc
@@ -225,6 +227,92 @@ class Column(Expr, Generic[T]):
         """Sort descending."""
         return Order(self, True)
 
+    def count(self) -> Aggregate[int]:
+        """SQL `count(col)`: the number of rows where the column is not null."""
+        return Aggregate("count", self)
+
+    def sum(self) -> Aggregate[T | None]:
+        """SQL `sum(col)`; `None` when there are no rows to add."""
+        return Aggregate("sum", self)
+
+    def avg(self) -> Aggregate[float | None]:
+        """SQL `avg(col)` as a float; `None` when there are no rows."""
+        return Aggregate("avg", self)
+
+    def min(self) -> Aggregate[T | None]:
+        """SQL `min(col)`; `None` when there are no rows."""
+        return Aggregate("min", self)
+
+    def max(self) -> Aggregate[T | None]:
+        """SQL `max(col)`; `None` when there are no rows."""
+        return Aggregate("max", self)
+
+
+class Aggregate(Expr, Generic[T]):
+    """An aggregate such as `count(*)` or `sum(col)`.
+
+    `kind` is `"count"`, `"sum"`, `"avg"`, `"min"` or `"max"`. `column` is the
+    source column, or `None` for `count(*)`. It can be compared, to filter
+    groups, and sorted with `.asc()` and `.desc()`.
+    """
+
+    __slots__ = ("kind", "column")
+    __hash__ = Expr.__hash__
+
+    def __init__(self, kind: str, column: Column[Any] | None) -> None:
+        """Build the aggregate `kind` over `column` (`None` means `*`)."""
+        self.kind = kind
+        self.column = column
+
+    def compile(self, ctx: ParamCollector) -> str:
+        """Return `count(*)`, `sum("t"."c")`, ...; Postgres casts `avg` to float."""
+        arg = "*" if self.column is None else self.column.compile(ctx)
+        text = f"{self.kind}({arg})"
+        if self.kind == "avg" and ctx.dialect.name == "postgres":
+            return f"CAST({text} AS DOUBLE PRECISION)"
+        return text
+
+    def __eq__(self, other: T | Aggregate[T] | Param | None) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
+        """`agg == x` is SQL `=`; `agg == None` is `IS NULL`."""
+        if other is None:
+            return IsNull(self, negate=False)
+        return BinOp("=", self, other)
+
+    def __ne__(self, other: T | Aggregate[T] | Param | None) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
+        """`agg != x` is SQL `<>`; `agg != None` is `IS NOT NULL`."""
+        if other is None:
+            return IsNull(self, negate=True)
+        return BinOp("<>", self, other)
+
+    def __lt__(self, other: T | Aggregate[T] | Param) -> BinOp:
+        """`agg < x`."""
+        return BinOp("<", self, other)
+
+    def __le__(self, other: T | Aggregate[T] | Param) -> BinOp:
+        """`agg <= x`."""
+        return BinOp("<=", self, other)
+
+    def __gt__(self, other: T | Aggregate[T] | Param) -> BinOp:
+        """`agg > x`."""
+        return BinOp(">", self, other)
+
+    def __ge__(self, other: T | Aggregate[T] | Param) -> BinOp:
+        """`agg >= x`."""
+        return BinOp(">=", self, other)
+
+    def asc(self) -> Order:
+        """Sort ascending."""
+        return Order(self, False)
+
+    def desc(self) -> Order:
+        """Sort descending."""
+        return Order(self, True)
+
+
+def count() -> Aggregate[int]:
+    """SQL `count(*)`: the number of rows in each group."""
+    return Aggregate("count", None)
+
 
 class BinOp(Expr):
     """A binary operator such as `=` or `LIKE`."""
@@ -251,7 +339,7 @@ class IsNull(Expr):
 
     __slots__ = ("column", "negate")
 
-    def __init__(self, column: Column[Any], negate: bool) -> None:
+    def __init__(self, column: Expr, negate: bool) -> None:
         """Test `column` for null."""
         self.column = column
         self.negate = negate
