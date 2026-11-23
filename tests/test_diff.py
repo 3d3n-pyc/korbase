@@ -276,11 +276,11 @@ def test_sqlite_add_column_rules():
     assert out == 'ALTER TABLE "a" ADD COLUMN "y" TEXT NOT NULL DEFAULT \'z\';\n'
     bad = tbl("a", (ID, col("x"), col("y", "TEXT", False)))
     out = lite(snap(BASE), snap(bad))
-    assert out.startswith("-- korbase:review SQLite cannot add this column in place; rebuild the table\n")
-    assert 'ADD COLUMN "y" TEXT NOT NULL;' in out
+    assert "-- korbase:review new NOT NULL column a.y without default" in out
+    assert 'CREATE TABLE "a__new"' in out
     fk = ForeignKey("a_y_fkey", ("y",), "a", ("id",), "cascade")
     keyed = tbl("a", (ID, col("x"), col("y", "bigint")), foreign_keys=(fk,))
-    assert "cannot add this column in place" in lite(snap(BASE), snap(keyed))
+    assert 'CREATE TABLE "a__new"' in lite(snap(BASE), snap(keyed))
 
 
 def test_sqlite_drop_column_and_index():
@@ -290,12 +290,11 @@ def test_sqlite_drop_column_and_index():
     assert 'ALTER TABLE "a" DROP COLUMN "x";' in out
 
 
-def test_sqlite_alter_is_comment_only():
+def test_sqlite_alter_is_rebuild():
     new = tbl("a", (ID, col("x", "INTEGER", False, "0")))
     out = lite(snap(BASE), snap(new))
-    assert 'SQLite cannot alter the type of x on "a"; rebuild the table (see docs/sqlite.md)' in out
-    assert 'the nullability of x on "a"' in out and 'the default of x on "a"' in out
-    assert all(line.startswith("--") for line in out.splitlines())
+    assert out.startswith("-- korbase:no-transaction\nPRAGMA foreign_keys=OFF;\nBEGIN IMMEDIATE;\n")
+    assert out.endswith("PRAGMA foreign_key_check;\nCOMMIT;\nPRAGMA foreign_keys=ON;\n")
 
 
 def test_sqlite_type_case_insensitive():
@@ -307,9 +306,9 @@ def test_sqlite_constraints_by_columns():
     des = tbl("a", (ID, col("x")), uniques=(("renamed", ("x",)),))
     assert lite(snap(cur), snap(des)) == ""
     out = lite(snap(cur), snap(tbl("a", (ID, col("x")), pk=("x",))))
-    assert 'SQLite cannot alter the primary key on "a"' in out
+    assert 'CREATE TABLE "a__new"' in out and 'PRIMARY KEY ("x")' in out
     out = lite(snap(BASE), snap(des))
-    assert 'SQLite cannot alter a unique constraint on "a"' in out and "add unique" in out
+    assert 'UNIQUE ("x")' in out and 'RENAME TO "a"' in out
 
 
 def _part(where: str | None, unique: bool = False) -> Table:
