@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Any, Generic, Optional, TypeVar, Union
+from typing import Any, Generic, Optional, TypeVar, Union, overload
 
 from korbase._dialect import PG, Dialect
 from korbase._expr import (
+    Aggregate,
     Column,
     Expr,
     Order,
@@ -24,6 +25,7 @@ __all__ = [
     "Slot",
     "Compiled",
     "Select",
+    "SelectColumns",
     "Insert",
     "Upsert",
     "Update",
@@ -39,16 +41,28 @@ __all__ = [
 
 M = TypeVar("M")
 _Q = TypeVar("_Q", bound="_Query[Any]")
+R = TypeVar("R")
+X1 = TypeVar("X1")
+X2 = TypeVar("X2")
+X3 = TypeVar("X3")
+X4 = TypeVar("X4")
+X5 = TypeVar("X5")
+X6 = TypeVar("X6")
 
 Slot = Union[Param, Value]
 
 
 @dataclass(frozen=True)
 class Compiled:
-    """SQL text plus the slots that fill its numbered placeholders (`$n` or `?n`), in order."""
+    """SQL text plus the slots that fill its numbered placeholders (`$n` or `?n`), in order.
+
+    `outputs` is set for column queries: one entry per selected item, the
+    source column to decode the value with, or `None` for `count` and `avg`.
+    """
 
     sql: str
     slots: tuple[Slot, ...]
+    outputs: tuple[Optional[Column[Any]], ...] = ()
 
 
 class _Query(Generic[M]):
@@ -182,33 +196,79 @@ def _slots(values: dict[str, Any]) -> dict[str, Slot]:
     return {k: v if isinstance(v, (Param, Value)) else Value(v) for k, v in values.items()}
 
 
-class Select(_Filtered[M]):
-    """A `SELECT` over all columns of one model; runs as rows."""
+class _Ordered(_Filtered[M]):
+    """A filtered `SELECT` with order and paging; can switch to chosen columns."""
 
     returns_rows = True
 
     def __init__(self, model: type[M]) -> None:
-        """Start with no filter, order, paging or loads."""
+        """Start with no filter, order or paging."""
         super().__init__(model)
         self._orders: tuple[Order, ...] = ()
         self._limit: Optional[Slot] = None
         self._offset: Optional[Slot] = None
+
+    def limit(self: _Q, value: Union[Param, int]) -> _Q:
+        """Return at most `value` rows."""
+        return self._replace(_limit=_paging(value))
+
+    def offset(self: _Q, value: Union[Param, int]) -> _Q:
+        """Skip the first `value` rows."""
+        return self._replace(_offset=_paging(value))
+
+    @overload
+    def columns(self, a: _Item[X1], /) -> SelectColumns[tuple[X1]]: ...
+    @overload
+    def columns(self, a: _Item[X1], b: _Item[X2], /) -> SelectColumns[tuple[X1, X2]]: ...
+    @overload
+    def columns(self, a: _Item[X1], b: _Item[X2], c: _Item[X3], /) -> SelectColumns[tuple[X1, X2, X3]]: ...
+    @overload
+    def columns(
+        self, a: _Item[X1], b: _Item[X2], c: _Item[X3], d: _Item[X4], /
+    ) -> SelectColumns[tuple[X1, X2, X3, X4]]: ...
+    @overload
+    def columns(
+        self, a: _Item[X1], b: _Item[X2], c: _Item[X3], d: _Item[X4], e: _Item[X5], /
+    ) -> SelectColumns[tuple[X1, X2, X3, X4, X5]]: ...
+    @overload
+    def columns(
+        self, a: _Item[X1], b: _Item[X2], c: _Item[X3], d: _Item[X4], e: _Item[X5], f: _Item[X6], /
+    ) -> SelectColumns[tuple[X1, X2, X3, X4, X5, X6]]: ...
+    def columns(self, *items: Any) -> Any:
+        """Select chosen columns and aggregates instead of whole rows.
+
+        Rows come back as tuples, in the order given. Calling it again
+        replaces the list. Use `group_by` and `having` on the result.
+        """
+        for item in items:
+            if not isinstance(item, (Column, Aggregate)):
+                raise KorbaseError(f"columns() takes columns and aggregates, got {item!r}")
+        new = self._become(SelectColumns)
+        return new._replace(_columns=items, _group=(), _having=None)
+
+
+_Item = Union[Column[X1], Aggregate[X1]]
+
+
+def _check_orders(orders: tuple[Any, ...], allowed: tuple[type, ...]) -> None:
+    """Raise `TypeError` if an order is not one of the `allowed` types."""
+    for o in orders:
+        if not isinstance(o, allowed):
+            raise TypeError(f"order_by() takes columns or .asc()/.desc(), got {type(o).__name__}")
+
+
+class Select(_Ordered[M]):
+    """A `SELECT` over all columns of one model; runs as rows."""
+
+    def __init__(self, model: type[M]) -> None:
+        """Start with no filter, order, paging or loads."""
+        super().__init__(model)
         self._loads: tuple[RelRef, ...] = ()
 
     def order_by(self, *orders: Union[Column[Any], Order]) -> Select[M]:
         """Sort rows, using `col.asc()` or `col.desc()`."""
-        for o in orders:
-            if not isinstance(o, (Column, Order)):
-                raise TypeError(f"order_by() takes columns or .asc()/.desc(), got {type(o).__name__}")
+        _check_orders(orders, (Column, Order))
         return self._replace(_orders=self._orders + tuple(orders))
-
-    def limit(self, value: Union[Param, int]) -> Select[M]:
-        """Return at most `value` rows."""
-        return self._replace(_limit=_paging(value))
-
-    def offset(self, value: Union[Param, int]) -> Select[M]:
-        """Skip the first `value` rows."""
-        return self._replace(_offset=_paging(value))
 
     def load(self, *relations: RelRef) -> Select[M]:
         """Remember relations to load along with the rows."""
@@ -218,14 +278,99 @@ class Select(_Filtered[M]):
         """Return the `SELECT` statement."""
         t = self._table()
         names = ", ".join(f"{t}.{quote_ident(c.name)}" for c in self._meta.columns)
-        sql = f"SELECT {names} FROM {t}" + _where(self, ctx)
-        if self._orders:
-            sql += " ORDER BY " + ", ".join(compile_expr(o, ctx) for o in self._orders)
-        if self._limit is not None:
-            sql += f" LIMIT {ctx.add(self._limit)}"
-        if self._offset is not None:
-            sql += f" OFFSET {ctx.add(self._offset)}"
-        return sql
+        return _finish(self, f"SELECT {names} FROM {t}", ctx)
+
+
+def _finish(query: Any, sql: str, ctx: ParamCollector, middle: Any = None) -> str:
+    """Add WHERE, the `middle` clauses, ORDER BY, LIMIT and OFFSET to `sql`."""
+    sql += _where(query, ctx)
+    if middle is not None:
+        sql += middle()
+    if query._orders:
+        sql += " ORDER BY " + ", ".join(compile_expr(o, ctx) for o in query._orders)
+    if query._limit is not None:
+        sql += f" LIMIT {ctx.add(query._limit)}"
+    if query._offset is not None:
+        sql += f" OFFSET {ctx.add(query._offset)}"
+    return sql
+
+
+class SelectColumns(_Ordered[Any], Generic[R]):
+    """A `SELECT` of chosen columns and aggregates; runs as tuples of type `R`."""
+
+    def __init__(self, model: type[Any]) -> None:
+        """Start with no columns, grouping or `having` filter."""
+        super().__init__(model)
+        self._columns: tuple[Any, ...] = ()
+        self._group: tuple[Column[Any], ...] = ()
+        self._having: Optional[Expr] = None
+
+    def order_by(self, *orders: Union[Column[Any], Aggregate[Any], Order]) -> SelectColumns[R]:
+        """Sort rows, using columns, aggregates, `.asc()` or `.desc()`."""
+        _check_orders(orders, (Column, Aggregate, Order))
+        return self._replace(_orders=self._orders + tuple(orders))
+
+    def group_by(self, *columns: Column[Any]) -> SelectColumns[R]:
+        """Group rows by these columns, one result row per group."""
+        if not columns or not all(isinstance(c, Column) for c in columns):
+            raise KorbaseError("group_by() takes one or more columns")
+        return self._replace(_group=self._group + tuple(columns))
+
+    def having(self, *conditions: Expr) -> SelectColumns[R]:
+        """Keep only groups matching the conditions (ANDed with earlier calls)."""
+        if not conditions:
+            raise TypeError("having() needs at least one condition")
+        having = self._having
+        for expr in conditions:
+            having = _cond(having, expr)
+        return self._replace(_having=having)
+
+    def _validate(self) -> None:
+        """Raise `KorbaseError` if the columns, grouping and `having` do not fit together."""
+        if not self._columns:
+            raise KorbaseError("columns() needs at least one column or aggregate")
+        for item in self._columns + self._group:
+            if isinstance(item, Column) and item.table.name != self._meta.name:
+                raise KorbaseError(f"column {item.name!r} is not a column of {self._meta.name!r}")
+        plain = [c for c in self._columns if isinstance(c, Column)]
+        grouped = {(c.table.name, c.name) for c in self._group}
+        if (self._group or len(plain) < len(self._columns)) and any(
+            (c.table.name, c.name) not in grouped for c in plain
+        ):
+            raise KorbaseError("a plain column must be listed in group_by() when mixed with aggregates")
+        if self._having is not None and not self._group and len(plain) == len(self._columns):
+            raise KorbaseError("having() needs an aggregate or group_by()")
+
+    def _group_sql(self, ctx: ParamCollector) -> str:
+        """Return the ` GROUP BY ...` clause, or an empty string."""
+        if not self._group:
+            return ""
+        return " GROUP BY " + ", ".join(c.compile(ctx) for c in self._group)
+
+    def _having_sql(self, ctx: ParamCollector) -> str:
+        """Return the ` HAVING ...` clause, or an empty string."""
+        if self._having is None:
+            return ""
+        return " HAVING " + compile_expr(self._having, ctx)
+
+    def _build(self, ctx: ParamCollector) -> str:
+        """Return the `SELECT` statement."""
+        self._validate()
+        names = ", ".join(compile_expr(c, ctx) for c in self._columns)
+        sql = f"SELECT {names} FROM {self._table()}"
+        return _finish(self, sql, ctx, lambda: self._group_sql(ctx) + self._having_sql(ctx))
+
+    def _compile_for(self, dialect: Dialect) -> Compiled:
+        """Build the `Compiled` of this query, with the per-item decode columns."""
+        done = super()._compile_for(dialect)
+        return Compiled(done.sql, done.slots, tuple(_source(c) for c in self._columns))
+
+
+def _source(item: Any) -> Optional[Column[Any]]:
+    """Return the column that decodes `item`'s value, or None for `count` and `avg`."""
+    if isinstance(item, Column):
+        return item
+    return item.column if item.kind in ("sum", "min", "max") else None
 
 
 class Insert(_Query[M]):
