@@ -16,7 +16,8 @@ Say you fetch 100 posts (1 query), then ask for the author of each post (100
 more queries). That is 101 round trips to the database, and it gets slower as
 the list grows. Korbase avoids it: a relation is filled by one extra query for
 all the rows at once, so 100 posts with their authors take 2 queries. A
-relation is loaded only when you ask for it with `.load()`.
+relation is loaded only when you ask for it with `.load()`. To read columns
+of two tables in one query instead, see [Joins](#joins).
 
 ## Declare a relation
 
@@ -90,6 +91,138 @@ asyncio.run(main())
 - `db.first()` takes `.load()` too, and so does `tx.run()` inside a
   [transaction](transactions.md).
 - Nothing is loaded when you read the attribute. There is no lazy loading.
+
+## Joins
+
+**Use this when** you want columns of two or three tables side by side, in one
+query: each post with its author, or each user with their posts, flat.
+
+`.join(Model)` adds a table to a `select`. Each row comes back as a tuple, one
+model per table. This example uses the `User` and `Post` models above.
+
+```python
+from korbase import cols, select
+
+U, P = cols(User), cols(Post)
+
+rows = await db.run(select(Post).join(User).order_by(P.id.asc()))
+for post, user in rows:
+    print(post.title, "by", user.name)
+```
+
+`rows` is a `list[tuple[Post, User]]`, and the editor knows it. On Postgres,
+Korbase sends one query:
+
+```sql
+SELECT "posts"."id", "posts"."author_id", "posts"."title", "users"."id", "users"."name" FROM "posts" JOIN "users" ON "posts"."author_id" = "users"."id" ORDER BY "posts"."id" ASC
+```
+
+On SQLite the SQL is the same, with `?1`, `?2` in place of `$1`, `$2`. A join
+is an `INNER JOIN`: a post with no author (`author_id` is `NULL`) is not in
+the result.
+
+### Keep the rows with no match
+
+`.left_join(Model)` keeps every row of the first table. When nothing matches,
+the joined model is `None`, and the editor types it as `Model | None`.
+
+```python
+rows = await db.run(select(User).left_join(Post).order_by(U.id.asc(), P.id.asc()))
+for user, post in rows:
+    print(user.name, post.title if post else "no post")
+```
+
+A user with three posts is three rows, and a user with none is one row with
+`post` set to `None`. Korbase decides a model is missing when all of its
+primary key columns are `NULL`.
+
+### Which columns are joined
+
+Without `on=`, Korbase uses the one foreign key between the two tables, in
+either direction. `select(Post).join(User)` and `select(User).left_join(Post)`
+both use `posts.author_id = users.id`. When there is no such key, or
+more than one, pass the condition yourself, with columns of both tables:
+
+```python
+select(Post).join(User, on=P.author_id == U.id)
+```
+
+`on=` takes a condition built with `cols()`, not a string.
+
+### Filter, sort and count
+
+`where()`, `order_by()`, `limit()` and `offset()` can use the column of any
+table in the query. Keyword pairs in `where()` always mean the first model:
+
+```python
+q = select(Post).join(User).where(U.name == "Ada", title="Hello")
+```
+
+This is `"users"."name" = $1 AND "posts"."title" = $2`. A column of a table
+that is not in the query raises `KorbaseError`.
+
+`.columns()`, `.group_by()` and `.having()` work over a join, as in
+[Aggregates](queries.md#aggregates-and-grouping). Here is the number of posts
+for each user, with `0` for the users who have none:
+
+```python
+q = (
+    select(User).left_join(Post)
+    .columns(U.name, P.id.count())
+    .group_by(U.name)
+    .order_by(P.id.count().desc(), U.name.asc())
+)
+rows = await db.run(q)   # [("Ada", 2), ("Bob", 1), ("Cy", 0)]
+```
+
+`P.id.count()` counts the posts, not the rows, so a user with no post gives
+`0`. `count()` would give `1`.
+
+### Three tables
+
+A join can be followed by one more, so a query has at most two joins. The
+second one looks for its foreign key in all the tables already in the query.
+
+```python
+rows = await db.run(select(Post).join(User).left_join(Comment))
+```
+
+This assumes a `Comment` model with a foreign key to `posts`. Each row is a
+`tuple[Post, User, Comment | None]`.
+
+### What Korbase refuses
+
+These raise `KorbaseError`:
+
+- `.join(Model)` when no foreign key links the table to the query, or when
+  several do. Pass `on=`.
+- The same table twice, a self-join such as `select(User).join(User)`.
+  Use [raw SQL](transactions.md) for that.
+- A third join.
+- `.load()` before a join. After a join there is no `.load()` at all.
+
+Also, `db.run()` and `db.first()` take a join, but `db.value()` does not:
+a row of models is not a single value. `db.value()` still works on a
+`.columns()` query, with or without a join.
+
+### Join or load
+
+Both give you linked rows. They answer different questions.
+
+| | `.load()` | `.join()` |
+|---|---|---|
+| Queries | one, plus one per relation | one |
+| Result | models with nested objects: `post.author.name` | flat tuples: `(post, user)` |
+| Needs a `Rel` field | yes | no, only a foreign key |
+| Filter on the other table | no | yes |
+| Group and count over both | no | yes |
+
+Use `.load()` when you want a tree of objects to return from an API, such as a
+user with their list of posts. Use a join when you filter or sort on the other
+table (`where(U.name == "Ada")`), count across it, or want a flat report.
+A join repeats the first row once for each match, so a user with 100 posts
+is 100 rows. A join does not fill `Rel` fields: `post.author` stays at its
+default.
 
 ## Going further
 

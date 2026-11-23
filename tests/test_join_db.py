@@ -137,3 +137,17 @@ def test_first(backend_dsn: str) -> None:
         assert await db.first(select(Book).join(Author).where(b.id == 99)) is None
 
     run(body, backend_dsn)
+
+
+def test_value_refuses_a_join() -> None:
+    """`value()` on a whole-row join raises KorbaseError, not AttributeError."""
+    import pytest
+
+    from korbase import KorbaseError
+
+    async def main() -> None:
+        async with await Database.connect("sqlite::memory:") as db:
+            with pytest.raises(KorbaseError, match="exactly one column"):
+                await db.value(select(Book).join(Author))  # type: ignore[arg-type]
+
+    asyncio.run(main())

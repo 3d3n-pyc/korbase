@@ -233,6 +233,8 @@ Two more limits:
 - Postgres has no `min` or `max` for `uuid` columns, so `.min()` and `.max()`
   on one fail in the database.
 
+Aggregates also work over a join: see [Joins](relations.md#joins).
+
 The editor knows the type of each tuple for up to six items in `columns()`.
 Calling `columns()` again replaces the list, and clears `group_by()` and
 `having()`.

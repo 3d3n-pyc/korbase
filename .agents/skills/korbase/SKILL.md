@@ -99,6 +99,23 @@ an aggregate or `group_by`; an empty `columns()` raises `KorbaseError`.
 `.load()` is not available here, and Postgres has no `min` or `max` on
 `uuid`.
 
+Joins: `select(Book).join(Author)` runs one query and returns tuples,
+`list[tuple[Book, Author]]`. `.left_join(X)` gives `X | None` when nothing
+matches. Without `on=`, the one foreign key between the tables is used
+(either direction); else pass `on=cols(A).x == cols(B).y`.
+
+```python
+a = cols(Author)
+rows = await db.run(select(Book).join(Author).where(a.name == "Ada"))   # [(Book, Author)]
+counts = select(Author).left_join(Book).columns(a.name, b.id.count()).group_by(a.name)
+```
+
+At most two joins. `where`, `order_by` and `columns` take columns of any
+joined table; `where(title=...)` means the first model. `run` and `first`
+work, `value` only with `columns()`. A join does not fill `Rel` fields, and
+`KorbaseError` is raised for zero or several foreign keys without `on=`, the
+same table twice, a third join and `.load()` with a join.
+
 ## Running
 
 ```python
@@ -121,7 +138,8 @@ be `None`: `run` raises. Use `.where(col=None)` or `.is_null()`.
 `select(Author).load(cols(Author).books)` runs one extra query per
 relation (not one per row) and fills the field. Loads work both ways
 (one-to-many and many-to-one), on `first` too, and inside transactions.
-Composite primary keys are not supported by `.load`.
+Composite primary keys are not supported by `.load`. To get two tables side
+by side in one query, use a join (see Queries) instead of `.load`.
 
 ## Transactions and raw SQL
 
