@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 
 from korbase._ddl import _cols
 from korbase._dialect import PG, Dialect
+from korbase._dialect import SQLITE as LITE
 from korbase._ident import quote_ident
 from korbase._schema import Column, ForeignKey, Index, Snapshot, Table, normalize_where
 
@@ -23,6 +24,7 @@ class Change:
     phase: int
     sql: str
     comments: tuple[str, ...] = ()
+    rebuild: bool = False
 
 
 def _review(reason: str) -> str:
@@ -153,27 +155,74 @@ def _alter_column(table: str, old: Column, new: Column) -> list[Change]:
     return out
 
 
-def _rebuild(table: str, what: str, intended: str) -> Change:
-    """Return a comment-only change: SQLite cannot alter `what`, the table must be rebuilt."""
-    lines = (
-        _review(f'SQLite cannot alter {what} on "{table}"; rebuild the table (see docs/sqlite.md)'),
-        f"-- intended: {intended}",
-    )
-    return Change(ALTER_COLUMN, "", lines)
+def _cast_type(old: Column, new: Column) -> bool:
+    """Return true when the type of a column changes (SQLite compares types without case)."""
+    return old.type.upper() != new.type.upper()
 
 
-def _alter_column_sqlite(table: str, old: Column, new: Column) -> list[Change]:
-    """Return the comment-only changes for a column SQLite cannot alter in place."""
-    out, name = [], new.name
-    if old.type.upper() != new.type.upper():
-        out.append(_rebuild(table, f"the type of {name}", f"{name} changes from {old.type} to {new.type}"))
-    if old.nullable != new.nullable:
-        out.append(
-            _rebuild(table, f"the nullability of {name}", f"{name} becomes {'NULL' if new.nullable else 'NOT NULL'}")
-        )
-    if old.default != new.default:
-        out.append(_rebuild(table, f"the default of {name}", f"{name} default becomes {new.default or 'none'}"))
-    return out
+def _rebuild_needed(cur: Table, des: Table) -> bool:
+    """Return true when SQLite cannot alter `cur` into `des` in place, so the table must be rebuilt."""
+    old = {c.name: c for c in cur.columns}
+    for c in des.columns:
+        was = old.get(c.name)
+        if was is None and not _add_in_place(des, c):
+            return True
+        if was is not None and (_cast_type(was, c) or was.nullable != c.nullable or was.default != c.default):
+            return True
+    shapes = lambda t: {_fk_shape(f) for f in t.foreign_keys}  # noqa: E731
+    uniques = lambda t: {c for _, c in t.uniques}  # noqa: E731
+    return cur.pk != des.pk or uniques(cur) != uniques(des) or shapes(cur) != shapes(des)
+
+
+def _copy_reviews(cur: Table, des: Table) -> tuple[str, ...]:
+    """Return the review lines for the data the copy into the rebuilt table can lose or fail on."""
+    t, old, out = cur.name, {c.name: c for c in cur.columns}, []
+    for c in des.columns:
+        was = old.get(c.name)
+        if was is None and not c.nullable and c.default is None and not c.identity:
+            out.append(_review(f"new NOT NULL column {t}.{c.name} without default fails on a non-empty table"))
+        elif was is not None and _cast_type(was, c):
+            out.append(_review(f"type of {t}.{c.name} changes from {was.type} to {c.type}, copied with CAST"))
+        elif was is not None and was.nullable and not c.nullable:
+            out.append(_review(f"{t}.{c.name} becomes NOT NULL, fails if NULLs exist"))
+    kept = {c.name for c in des.columns}
+    out += [_review(f"drops column {t}.{c.name}, its data is lost") for c in cur.columns if c.name not in kept]
+    return tuple(out)
+
+
+def _copy_sql(cur: Table, des: Table, temp: str) -> str:
+    """Return the `INSERT ... SELECT` that copies the shared columns of `cur` into `temp`."""
+    old = {c.name: c for c in cur.columns}
+    shared = [c for c in des.columns if c.name in old]
+    picks = [
+        f"CAST({quote_ident(c.name)} AS {c.type})" if _cast_type(old[c.name], c) else quote_ident(c.name)
+        for c in shared
+    ]
+    names = ", ".join(quote_ident(c.name) for c in shared)
+    return f"INSERT INTO {quote_ident(temp)} ({names}) SELECT {', '.join(picks)} FROM {quote_ident(cur.name)}"
+
+
+def _lost_reviews(cur: Table, des: Table) -> tuple[str, ...]:
+    """Return a review line per object the rebuild drops: unmanaged indexes, triggers, CHECK constraints."""
+    t, kept = des.name, {i.name for i in des.indexes}
+    out = [f'index "{i.name}"' for i in cur.indexes if i.name not in kept]
+    out += [f'trigger "{n}"' for n in getattr(cur, "triggers", ())]
+    if getattr(cur, "has_check", False):
+        out.append("CHECK constraint")
+    return tuple(_review(f'{what} on "{t}" is dropped by this rebuild; recreate it below') for what in out)
+
+
+def _rebuild_table(cur: Table, des: Table) -> list[Change]:
+    """Return the changes that rebuild a SQLite table: new table, copy, drop, rename, indexes."""
+    temp = f"{des.name}__new"
+    create = _create_table(replace(des, name=temp, indexes=()), LITE)[0].sql
+    steps: list[tuple[str, tuple[str, ...]]] = [(create, _lost_reviews(cur, des))]
+    if any(c.name in {o.name for o in cur.columns} for c in des.columns):
+        steps.append((_copy_sql(cur, des, temp), _copy_reviews(cur, des)))
+    steps.append((f"DROP TABLE {quote_ident(cur.name)}", ()))
+    steps.append((_alter(temp, f"RENAME TO {quote_ident(des.name)}"), ()))
+    steps += [(_index_sql(des.name, i), ()) for i in des.indexes]
+    return [Change(ALTER_COLUMN, sql, notes, True) for sql, notes in steps]
 
 
 def _constant_default(default: str) -> bool:
@@ -210,13 +259,11 @@ def _diff_columns(cur: Table, des: Table, dialect: Dialect = PG) -> list[Change]
     out = []
     for c in added:
         notes = () if lite else _not_null_review(t, c)
-        if lite and not _add_in_place(des, c):
-            notes = (_review("SQLite cannot add this column in place; rebuild the table"),)
         notes += _hint(hints, c.name)
         out.append(Change(ADD_COLUMN, _alter(t, f"ADD COLUMN {_column_def(c, dialect)}"), notes))
     for c in des.columns:
         if c.name in old:
-            out += (_alter_column_sqlite if lite else _alter_column)(t, old[c.name], c)
+            out += [] if lite else _alter_column(t, old[c.name], c)
     for c in dropped:
         why = _review(f"drops column {t}.{c.name}, its data is lost")
         sql = _alter(t, f"DROP COLUMN {quote_ident(c.name)}")
@@ -269,27 +316,6 @@ def _diff_pk(cur: Table, des: Table) -> list[Change]:
     return out
 
 
-def _diff_keys_sqlite(cur: Table, des: Table) -> list[Change]:
-    """Return the key changes of a SQLite table: comments for constraints, real SQL for indexes."""
-    t = cur.name
-    out = []
-    if cur.pk != des.pk:
-        out.append(_rebuild(t, "the primary key", f"primary key becomes ({_cols(des.pk or ())})"))
-    old_u, new_u = {c for _, c in cur.uniques}, {c for _, c in des.uniques}
-    out += [_rebuild(t, "a unique constraint", f"drop unique ({_cols(c)})") for c in sorted(old_u - new_u)]
-    out += [_rebuild(t, "a unique constraint", f"add unique ({_cols(c)})") for c in sorted(new_u - old_u)]
-    old_f = {f.columns: f for f in cur.foreign_keys}
-    new_f = {f.columns: f for f in des.foreign_keys}
-    for cols in old_f:
-        if cols not in new_f:
-            out.append(_rebuild(t, "a foreign key", f"drop foreign key ({_cols(cols)})"))
-    for cols, fk in new_f.items():
-        old = old_f.get(cols)
-        if old is None or _fk_shape(old) != _fk_shape(fk):
-            out.append(_rebuild(t, "a foreign key", f"add {_sqlite_fk_def(fk)}"))
-    return out + _diff_indexes(cur, des)
-
-
 def _fk_shape(fk: ForeignKey) -> tuple:
     """Return a foreign key without its name, which SQLite does not keep."""
     return (fk.columns, fk.target_table, fk.target_columns, fk.on_delete.upper())
@@ -311,7 +337,7 @@ def _diff_indexes(cur: Table, des: Table) -> list[Change]:
 def _diff_keys(cur: Table, des: Table, dialect: Dialect = PG) -> list[Change]:
     """Return the key, unique and index changes of a table present on both sides."""
     if dialect.name == "sqlite":
-        return _diff_keys_sqlite(cur, des)
+        return _diff_indexes(cur, des)
     t = cur.name
     out = _diff_pk(cur, des)
     out += _diff_uniques(cur, des)
@@ -368,6 +394,8 @@ def diff(current: Snapshot, desired: Snapshot, dialect: Dialect = PG) -> list[Ch
             out += _create_table(des, dialect)
         elif des is None and cur is not None:
             out += _drop_table(cur, dialect)
+        elif cur is not None and des is not None and dialect.name == "sqlite" and _rebuild_needed(cur, des):
+            out += _rebuild_table(cur, des)
         elif cur is not None and des is not None:
             out += _diff_columns(cur, des, dialect) + _diff_keys(cur, des, dialect)
     if dialect.name != "sqlite":
@@ -380,9 +408,21 @@ def diff(current: Snapshot, desired: Snapshot, dialect: Dialect = PG) -> list[Ch
 _SET_STRINGS = "SET standard_conforming_strings = on;\n"
 
 
+_REBUILD_OPEN = "-- korbase:no-transaction\nPRAGMA foreign_keys=OFF;\nBEGIN IMMEDIATE;\n"
+_REBUILD_CLOSE = "PRAGMA foreign_key_check;\nCOMMIT;\nPRAGMA foreign_keys=ON;\n"
+
+
 def render(changes: list[Change], dialect: Dialect = PG) -> str:
-    """Return the SQL file body for `changes`: on Postgres `SET standard_conforming_strings = on;`, then comment lines and each statement ending in `;` (a comment-only change has no statement)."""
+    """Return the SQL file body for `changes`.
+
+    On Postgres it starts with `SET standard_conforming_strings = on;`. Comment lines come before each
+    statement, which ends in `;`. On SQLite, when a table is rebuilt, the whole body runs outside
+    korbase's transaction (first line `-- korbase:no-transaction`), between `PRAGMA foreign_keys=OFF`
+    and `ON`, in its own `BEGIN IMMEDIATE` ... `COMMIT`, with a `PRAGMA foreign_key_check` before the commit.
+    """
     if not changes:
         return ""
     body = "".join("".join(f"{c}\n" for c in ch.comments) + (ch.sql + ";\n" if ch.sql else "") for ch in changes)
-    return body if dialect.name == "sqlite" else _SET_STRINGS + body
+    if dialect.name != "sqlite":
+        return _SET_STRINGS + body
+    return _REBUILD_OPEN + body + _REBUILD_CLOSE if any(ch.rebuild for ch in changes) else body

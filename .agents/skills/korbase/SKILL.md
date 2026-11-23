@@ -77,7 +77,46 @@ if the file is stale. Keyword filters `.where(title=...)` are runtime only.
 Also `.offset()`, `like`, `ilike`, `in_`, `is_not_null`, `.desc()`.
 `upsert(M).on_conflict("col").values(...)` updates the other columns on a
 clash. Guards: `update` and `delete` raise without `.where(...)` unless you
-call `.all_rows()`; `insert` and `upsert` need `.values(...)`.
+call `.all_rows()`; `insert` and `upsert` need `.values(...)` or `.rows(...)`.
+`.rows([{"a": 1}, {"a": 2}])` writes many rows in one statement, in order;
+every dict has the same keys, at most 32766 values per call.
+
+Counts, sums and groups: `select(M).columns(...)` returns tuples, and
+`db.value(q)` returns one value (or `None`). Aggregates are `count()` and
+`col.count()`, `.sum()`, `.avg()` (always a float), `.min()`, `.max()`.
+
+```python
+from korbase import count
+
+per_author = (
+    select(Book).columns(b.author_id, count())
+    .group_by(b.author_id).having(count() > 1).order_by(count().desc())
+)
+# await db.run(per_author)  ->  [(1, 3), (2, 2)]: list of tuples
+# await db.value(select(Book).columns(count()).where(author_id=1)) or 0  ->  3
+```
+
+A plain column next to an aggregate must be in `group_by`; `having` needs
+an aggregate or `group_by`; an empty `columns()` raises `KorbaseError`.
+`.load()` is not available here, and Postgres has no `min` or `max` on
+`uuid`.
+
+Joins: `select(Book).join(Author)` runs one query and returns tuples,
+`list[tuple[Book, Author]]`. `.left_join(X)` gives `X | None` when nothing
+matches. Without `on=`, the one foreign key between the tables is used
+(either direction); else pass `on=cols(A).x == cols(B).y`.
+
+```python
+a = cols(Author)
+rows = await db.run(select(Book).join(Author).where(a.name == "Ada"))   # [(Book, Author)]
+counts = select(Author).left_join(Book).columns(a.name, b.id.count()).group_by(a.name)
+```
+
+At most two joins. `where`, `order_by` and `columns` take columns of any
+joined table; `where(title=...)` means the first model. `run` and `first`
+work, `value` only with `columns()`. A join does not fill `Rel` fields, and
+`KorbaseError` is raised for zero or several foreign keys without `on=`, the
+same table twice, a third join and `.load()` with a join.
 
 ## Running
 
@@ -101,7 +140,8 @@ be `None`: `run` raises. Use `.where(col=None)` or `.is_null()`.
 `select(Author).load(cols(Author).books)` runs one extra query per
 relation (not one per row) and fills the field. Loads work both ways
 (one-to-many and many-to-one), on `first` too, and inside transactions.
-Composite primary keys are not supported by `.load`.
+Composite primary keys are not supported by `.load`. To get two tables side
+by side in one query, use a join (see Queries) instead of `.load`.
 
 ## Transactions and raw SQL
 
@@ -186,10 +226,13 @@ connection only) uses the standard library: nothing to install, SQLite
 - `ilike` ignores case for ASCII letters only. One writer at a time:
   `db.transaction()` is `BEGIN IMMEDIATE`; a busy file raises
   `korbase.DatabaseBusy` after `busy_timeout_ms` (retry the transaction).
-- `migrate make` cannot alter a type, nullability, default or key in place:
-  it writes a `-- korbase:review` block with `-- intended:`. Replace it with a
-  table rebuild (new table, copy, drop, rename), see `docs/sqlite.md`.
-- Not in the builder yet: aggregates. Use raw SQL.
+- `migrate make` writes the full table rebuild when SQLite cannot alter a
+  type, nullability, default or key in place (file starts with
+  `-- korbase:no-transaction`). A `-- korbase:review` line stays where data can
+  be lost: check with a `SELECT` (`CAST` turns bad text into 0), then delete
+  it. `apply` rolls back and records nothing if `foreign_key_check` fails.
+  See `docs/sqlite.md`.
+- Aggregates, `columns` and `group_by` work the same as on Postgres.
 
 ## Common mistakes
 

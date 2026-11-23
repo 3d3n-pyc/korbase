@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from collections import Counter
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +14,7 @@ from korbase._backend import Conn
 from korbase._db import Database
 from korbase._dialect import PG, SQLITE, Dialect
 from korbase._errors import DatabaseError, KorbaseError
+from korbase._sqlite import _split_statements
 
 __all__ = ["apply", "status"]
 
@@ -134,16 +137,34 @@ async def _claim(conn: Conn, f: _File) -> bool:
     return True
 
 
+async def _run_checked(conn: Conn, text: str) -> None:
+    """Run a SQLite script statement by statement; rows from `PRAGMA foreign_key_check` fail it."""
+    for stmt in _split_statements(text):
+        rows = await conn.fetch(stmt, [], tuple)
+        if rows and "foreign_key_check" in stmt:
+            broken = ", ".join(f"{t} ({n})" for t, n in Counter(r[0] for r in rows).items())
+            raise KorbaseError(f"foreign key check failed, broken rows in: {broken}")
+
+
+async def _undo_claimed(conn: Conn, f: _File) -> None:
+    """After a failure: roll back, turn foreign keys on again and delete the claim row."""
+    with suppress(Exception):
+        await conn.execute("ROLLBACK", [])
+    await conn.execute("PRAGMA foreign_keys=ON", [])
+    async with conn.transaction():
+        mark = SQLITE.placeholder(1)
+        await conn.execute(f"DELETE FROM korbase_migrations WHERE name = {mark}", [f.name])
+
+
 async def _run_claimed(conn: Conn, f: _File) -> bool:
-    """Run a no-transaction file on SQLite after claiming it; release the claim if it fails."""
+    """Run a no-transaction file on SQLite after claiming it; undo and release the claim if it fails."""
     if not await _claim(conn, f):
         return False
     try:
-        await conn.execute_script(f.text)
+        await _run_checked(conn, f.text)
+        await conn.execute("PRAGMA foreign_keys=ON", [])
     except BaseException:
-        async with conn.transaction():
-            mark = SQLITE.placeholder(1)
-            await conn.execute(f"DELETE FROM korbase_migrations WHERE name = {mark}", [f.name])
+        await _undo_claimed(conn, f)
         raise
     return True
 

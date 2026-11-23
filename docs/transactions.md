@@ -8,7 +8,7 @@ A [transaction](glossary.md#transaction) groups several statements into one unit
 
 A [savepoint](glossary.md#savepoint) is a bookmark inside a transaction. If a step fails, you go back to the bookmark and keep everything done before it. In korbase, a transaction opened inside a transaction is a savepoint.
 
-Most of the time you build queries with `select`, `insert`, `update`, `delete` and `upsert`. Use raw SQL when the query is something they cannot say, such as `balance = balance - 10` or a `JOIN` you wrote by hand. You lose the checks, but you can run any SQL.
+Most of the time you build queries with `select`, `insert`, `update`, `delete` and `upsert`. Use raw SQL when the query is something they cannot say, such as `balance = balance - 10` or a `CASE` expression. You lose the checks, but you can run any SQL.
 
 ## A first run
 

@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Generic, Optional, TypeVar, Union
+from typing import Any, Generic, Optional, TypeVar, Union, overload
 
 from korbase._dialect import PG, Dialect
 from korbase._expr import (
+    Aggregate,
     Column,
     Expr,
     Order,
@@ -18,12 +20,15 @@ from korbase._expr import (
     compile_expr,
 )
 from korbase._ident import KorbaseError, quote_ident
+from korbase._join import Join, JoinPart, check_tables, from_sql, make_join, parts_of, select_names, table_names
 from korbase._meta import TableMeta, table_meta
 
 __all__ = [
     "Slot",
     "Compiled",
     "Select",
+    "SelectColumns",
+    "SelectJoin",
     "Insert",
     "Upsert",
     "Update",
@@ -39,16 +44,34 @@ __all__ = [
 
 M = TypeVar("M")
 _Q = TypeVar("_Q", bound="_Query[Any]")
+R = TypeVar("R")
+X1 = TypeVar("X1")
+X2 = TypeVar("X2")
+X3 = TypeVar("X3")
+X4 = TypeVar("X4")
+X5 = TypeVar("X5")
+X6 = TypeVar("X6")
+JA = TypeVar("JA")
+JB = TypeVar("JB")
+JC = TypeVar("JC")
 
 Slot = Union[Param, Value]
+_MAX_PARAMS = 32766
 
 
 @dataclass(frozen=True)
 class Compiled:
-    """SQL text plus the slots that fill its numbered placeholders (`$n` or `?n`), in order."""
+    """SQL text plus the slots that fill its numbered placeholders (`$n` or `?n`), in order.
+
+    `outputs` is set for column queries: one entry per selected item, the
+    source column to decode the value with, or `None` for `count` and `avg`.
+    `parts` is set for whole-row joins: one `JoinPart` per model in the row.
+    """
 
     sql: str
     slots: tuple[Slot, ...]
+    outputs: tuple[Optional[Column[Any]], ...] = ()
+    parts: tuple[JoinPart, ...] = ()
 
 
 class _Query(Generic[M]):
@@ -182,50 +205,260 @@ def _slots(values: dict[str, Any]) -> dict[str, Slot]:
     return {k: v if isinstance(v, (Param, Value)) else Value(v) for k, v in values.items()}
 
 
-class Select(_Filtered[M]):
-    """A `SELECT` over all columns of one model; runs as rows."""
+def _row_slots(rows: Any) -> list[dict[str, Slot]]:
+    """Wrap each row's values as `Value`, all in the first row's key order."""
+    if isinstance(rows, (Mapping, str, bytes)) or not isinstance(rows, Sequence):
+        raise KorbaseError("rows() takes a list of dicts")
+    if not all(isinstance(r, Mapping) for r in rows):
+        raise KorbaseError("rows() takes a list of dicts")
+    if any(isinstance(v, (Param, Value)) for r in rows for v in r.values()):
+        raise KorbaseError("rows() takes plain values, not param()")
+    if not rows:
+        return []
+    order = list(rows[0])
+    return [_slots({k: r[k] for k in order if k in r} | {k: r[k] for k in r if k not in order}) for r in rows]
+
+
+class _Ordered(_Filtered[M]):
+    """A filtered `SELECT` with order and paging; can switch to chosen columns."""
 
     returns_rows = True
 
     def __init__(self, model: type[M]) -> None:
-        """Start with no filter, order, paging or loads."""
+        """Start with no filter, order or paging."""
         super().__init__(model)
         self._orders: tuple[Order, ...] = ()
         self._limit: Optional[Slot] = None
         self._offset: Optional[Slot] = None
+        self._joins: tuple[Join, ...] = ()
+
+    def limit(self: _Q, value: Union[Param, int]) -> _Q:
+        """Return at most `value` rows."""
+        return self._replace(_limit=_paging(value))
+
+    def offset(self: _Q, value: Union[Param, int]) -> _Q:
+        """Skip the first `value` rows."""
+        return self._replace(_offset=_paging(value))
+
+    @overload
+    def columns(self, a: _Item[X1], /) -> SelectColumns[tuple[X1]]: ...
+    @overload
+    def columns(self, a: _Item[X1], b: _Item[X2], /) -> SelectColumns[tuple[X1, X2]]: ...
+    @overload
+    def columns(self, a: _Item[X1], b: _Item[X2], c: _Item[X3], /) -> SelectColumns[tuple[X1, X2, X3]]: ...
+    @overload
+    def columns(
+        self, a: _Item[X1], b: _Item[X2], c: _Item[X3], d: _Item[X4], /
+    ) -> SelectColumns[tuple[X1, X2, X3, X4]]: ...
+    @overload
+    def columns(
+        self, a: _Item[X1], b: _Item[X2], c: _Item[X3], d: _Item[X4], e: _Item[X5], /
+    ) -> SelectColumns[tuple[X1, X2, X3, X4, X5]]: ...
+    @overload
+    def columns(
+        self, a: _Item[X1], b: _Item[X2], c: _Item[X3], d: _Item[X4], e: _Item[X5], f: _Item[X6], /
+    ) -> SelectColumns[tuple[X1, X2, X3, X4, X5, X6]]: ...
+    def columns(self, *items: Any) -> Any:
+        """Select chosen columns and aggregates instead of whole rows.
+
+        Rows come back as tuples, in the order given. Calling it again
+        replaces the list. Use `group_by` and `having` on the result.
+        """
+        for item in items:
+            if not isinstance(item, (Column, Aggregate)):
+                raise KorbaseError(f"columns() takes columns and aggregates, got {item!r}")
+        new = self._become(SelectColumns)
+        return new._replace(_columns=items, _group=(), _having=None)
+
+
+_Item = Union[Column[X1], Aggregate[X1]]
+
+
+def _check_orders(orders: tuple[Any, ...], allowed: tuple[type, ...]) -> None:
+    """Raise `TypeError` if an order is not one of the `allowed` types."""
+    for o in orders:
+        if not isinstance(o, allowed):
+            raise TypeError(f"order_by() takes columns or .asc()/.desc(), got {type(o).__name__}")
+
+
+class Select(_Ordered[M]):
+    """A `SELECT` over all columns of one model; runs as rows."""
+
+    def __init__(self, model: type[M]) -> None:
+        """Start with no filter, order, paging or loads."""
+        super().__init__(model)
         self._loads: tuple[RelRef, ...] = ()
 
     def order_by(self, *orders: Union[Column[Any], Order]) -> Select[M]:
         """Sort rows, using `col.asc()` or `col.desc()`."""
-        for o in orders:
-            if not isinstance(o, (Column, Order)):
-                raise TypeError(f"order_by() takes columns or .asc()/.desc(), got {type(o).__name__}")
+        _check_orders(orders, (Column, Order))
         return self._replace(_orders=self._orders + tuple(orders))
-
-    def limit(self, value: Union[Param, int]) -> Select[M]:
-        """Return at most `value` rows."""
-        return self._replace(_limit=_paging(value))
-
-    def offset(self, value: Union[Param, int]) -> Select[M]:
-        """Skip the first `value` rows."""
-        return self._replace(_offset=_paging(value))
 
     def load(self, *relations: RelRef) -> Select[M]:
         """Remember relations to load along with the rows."""
         return self._replace(_loads=self._loads + relations)
 
+    def join(self, model: type[X1], on: Optional[Expr] = None) -> SelectJoin[tuple[M, X1]]:
+        """Join another table (`JOIN`); rows become tuples of models.
+
+        Without `on`, the one foreign key between the tables is used.
+        """
+        return _start_join(self, model, False, on)
+
+    def left_join(self, model: type[X1], on: Optional[Expr] = None) -> SelectJoin[tuple[M, Optional[X1]]]:
+        """Join another table (`LEFT JOIN`); its model is `None` when nothing matches."""
+        return _start_join(self, model, True, on)
+
     def _build(self, ctx: ParamCollector) -> str:
         """Return the `SELECT` statement."""
         t = self._table()
         names = ", ".join(f"{t}.{quote_ident(c.name)}" for c in self._meta.columns)
-        sql = f"SELECT {names} FROM {t}" + _where(self, ctx)
-        if self._orders:
-            sql += " ORDER BY " + ", ".join(compile_expr(o, ctx) for o in self._orders)
-        if self._limit is not None:
-            sql += f" LIMIT {ctx.add(self._limit)}"
-        if self._offset is not None:
-            sql += f" OFFSET {ctx.add(self._offset)}"
-        return sql
+        return _finish(self, f"SELECT {names} FROM {t}", ctx)
+
+
+def _start_join(query: Any, model: type[Any], left: bool, on: Any) -> Any:
+    """Turn a `Select` into a `SelectJoin` with its first join."""
+    if query._loads:
+        raise KorbaseError("load() cannot be combined with a join")
+    new = query._become(SelectJoin)
+    return new._add_join(model, left, on)
+
+
+class SelectJoin(_Ordered[Any], Generic[R]):
+    """A `SELECT` over joined tables; runs as tuples of models of type `R`."""
+
+    def order_by(self, *orders: Union[Column[Any], Order]) -> SelectJoin[R]:
+        """Sort rows, using `col.asc()` or `col.desc()`."""
+        _check_orders(orders, (Column, Order))
+        return self._replace(_orders=self._orders + tuple(orders))
+
+    def _add_join(self, model: type[Any], left: bool, on: Any) -> Any:
+        """Return a copy with one more join."""
+        join = make_join(self._meta, self._joins, table_meta(model), left, on)
+        return self._replace(_joins=self._joins + (join,))
+
+    def join(
+        self: SelectJoin[tuple[JA, JB]], model: type[JC], on: Optional[Expr] = None
+    ) -> SelectJoin[tuple[JA, JB, JC]]:
+        """Join a third table (`JOIN`); at most two joins are allowed."""
+        return self._add_join(model, False, on)
+
+    def left_join(
+        self: SelectJoin[tuple[JA, JB]], model: type[JC], on: Optional[Expr] = None
+    ) -> SelectJoin[tuple[JA, JB, Optional[JC]]]:
+        """Join a third table (`LEFT JOIN`); at most two joins are allowed."""
+        return self._add_join(model, True, on)
+
+    def _build(self, ctx: ParamCollector) -> str:
+        """Return the `SELECT` statement."""
+        check_query(self)
+        sql = f"SELECT {select_names(self._meta, self._joins)} FROM {from_sql(self._meta, self._joins, ctx)}"
+        return _finish(self, sql, ctx)
+
+    def _compile_for(self, dialect: Dialect) -> Compiled:
+        """Build the `Compiled` of this query, with the slice of each model."""
+        done = super()._compile_for(dialect)
+        return Compiled(done.sql, done.slots, (), parts_of(self._meta, self._joins))
+
+
+def check_query(query: Any) -> None:
+    """Raise `KorbaseError` if filters or orders use a table that is not in the query."""
+    nodes = [n for n in (query._where, getattr(query, "_having", None)) if n is not None]
+    nodes += list(getattr(query, "_columns", ())) + list(query._orders)
+    check_tables(nodes, table_names(query._meta, query._joins))
+
+
+def _finish(query: Any, sql: str, ctx: ParamCollector, middle: Any = None) -> str:
+    """Add WHERE, the `middle` clauses, ORDER BY, LIMIT and OFFSET to `sql`."""
+    sql += _where(query, ctx)
+    if middle is not None:
+        sql += middle()
+    if query._orders:
+        sql += " ORDER BY " + ", ".join(compile_expr(o, ctx) for o in query._orders)
+    if query._limit is not None:
+        sql += f" LIMIT {ctx.add(query._limit)}"
+    if query._offset is not None:
+        sql += f" OFFSET {ctx.add(query._offset)}"
+    return sql
+
+
+class SelectColumns(_Ordered[Any], Generic[R]):
+    """A `SELECT` of chosen columns and aggregates; runs as tuples of type `R`."""
+
+    def __init__(self, model: type[Any]) -> None:
+        """Start with no columns, grouping or `having` filter."""
+        super().__init__(model)
+        self._columns: tuple[Any, ...] = ()
+        self._group: tuple[Column[Any], ...] = ()
+        self._having: Optional[Expr] = None
+
+    def order_by(self, *orders: Union[Column[Any], Aggregate[Any], Order]) -> SelectColumns[R]:
+        """Sort rows, using columns, aggregates, `.asc()` or `.desc()`."""
+        _check_orders(orders, (Column, Aggregate, Order))
+        return self._replace(_orders=self._orders + tuple(orders))
+
+    def group_by(self, *columns: Column[Any]) -> SelectColumns[R]:
+        """Group rows by these columns, one result row per group."""
+        if not columns or not all(isinstance(c, Column) for c in columns):
+            raise KorbaseError("group_by() takes one or more columns")
+        return self._replace(_group=self._group + tuple(columns))
+
+    def having(self, *conditions: Expr) -> SelectColumns[R]:
+        """Keep only groups matching the conditions (ANDed with earlier calls)."""
+        if not conditions:
+            raise TypeError("having() needs at least one condition")
+        having = self._having
+        for expr in conditions:
+            having = _cond(having, expr)
+        return self._replace(_having=having)
+
+    def _validate(self) -> None:
+        """Raise `KorbaseError` if the columns, grouping and `having` do not fit together."""
+        if not self._columns:
+            raise KorbaseError("columns() needs at least one column or aggregate")
+        for item in self._columns + self._group:
+            if isinstance(item, Column) and item.table.name not in table_names(self._meta, self._joins):
+                raise KorbaseError(f"column {item.name!r} is not a column of {self._meta.name!r}")
+        plain = [c for c in self._columns if isinstance(c, Column)]
+        grouped = {(c.table.name, c.name) for c in self._group}
+        if (self._group or len(plain) < len(self._columns)) and any(
+            (c.table.name, c.name) not in grouped for c in plain
+        ):
+            raise KorbaseError("a plain column must be listed in group_by() when mixed with aggregates")
+        if self._having is not None and not self._group and len(plain) == len(self._columns):
+            raise KorbaseError("having() needs an aggregate or group_by()")
+
+    def _group_sql(self, ctx: ParamCollector) -> str:
+        """Return the ` GROUP BY ...` clause, or an empty string."""
+        if not self._group:
+            return ""
+        return " GROUP BY " + ", ".join(c.compile(ctx) for c in self._group)
+
+    def _having_sql(self, ctx: ParamCollector) -> str:
+        """Return the ` HAVING ...` clause, or an empty string."""
+        if self._having is None:
+            return ""
+        return " HAVING " + compile_expr(self._having, ctx)
+
+    def _build(self, ctx: ParamCollector) -> str:
+        """Return the `SELECT` statement."""
+        self._validate()
+        check_query(self)
+        names = ", ".join(compile_expr(c, ctx) for c in self._columns)
+        sql = f"SELECT {names} FROM {from_sql(self._meta, self._joins, ctx)}"
+        return _finish(self, sql, ctx, lambda: self._group_sql(ctx) + self._having_sql(ctx))
+
+    def _compile_for(self, dialect: Dialect) -> Compiled:
+        """Build the `Compiled` of this query, with the per-item decode columns."""
+        done = super()._compile_for(dialect)
+        return Compiled(done.sql, done.slots, tuple(_source(c) for c in self._columns))
+
+
+def _source(item: Any) -> Optional[Column[Any]]:
+    """Return the column that decodes `item`'s value, or None for `count` and `avg`."""
+    if isinstance(item, Column):
+        return item
+    return item.column if item.kind in ("sum", "min", "max") else None
 
 
 class Insert(_Query[M]):
@@ -237,14 +470,40 @@ class Insert(_Query[M]):
         """Start with the default values."""
         super().__init__(model)
         self._values: Optional[dict[str, Slot]] = None
+        self._rows: Optional[list[dict[str, Slot]]] = None
 
     def values(self: _Q, **values: Any) -> _Q:
         """Set the columns to insert; plain values become anonymous slots."""
         self._check_columns(values)  # type: ignore[attr-defined]
-        return self._replace(_values=_slots(values))
+        return self._replace(_values=_slots(values), _rows=None)
+
+    def rows(self: _Q, rows: Sequence[Mapping[str, Any]]) -> _Q:
+        """Insert many rows in one statement; each row is a mapping like `.values(...)`.
+
+        Every row must have the same keys, and the rows come back in input order.
+        Columns missing from every row use their default. The list must not be
+        empty and may hold at most 32766 bound values; split larger lists into
+        batches. Replaces earlier `.rows(...)` and `.values(...)`.
+        """
+        slots = _row_slots(rows)
+        self._check_rows(slots)  # type: ignore[attr-defined]
+        return self._replace(_rows=slots, _values=None)
+
+    def _check_rows(self, rows: list[dict[str, Slot]]) -> None:
+        """Raise `KorbaseError` if `rows` is empty, uneven, unknown or too large."""
+        if not rows or not rows[0]:
+            raise KorbaseError("rows needs at least one row with at least one column")
+        keys = set(rows[0])
+        if any(set(r) != keys for r in rows):
+            raise KorbaseError("every row must have the same columns")
+        self._check_columns(keys)
+        if len(rows) * len(keys) > _MAX_PARAMS:
+            raise KorbaseError(f"too many values (over {_MAX_PARAMS}); split the list into smaller batches")
 
     def _row(self) -> dict[str, Slot]:
         """Return the values to insert, defaulting to same-named params."""
+        if self._rows is not None:
+            return self._rows[0]
         if self._values is not None:
             return self._values
         return {c.name: Param(c.name) for c in self._meta.columns if c.default is None}
@@ -255,8 +514,8 @@ class Insert(_Query[M]):
         if not row:
             return f"INSERT INTO {self._table()} DEFAULT VALUES" + self._tail()
         names = ", ".join(quote_ident(k) for k in row)
-        marks = ", ".join(ctx.add(v) for v in row.values())
-        sql = f"INSERT INTO {self._table()} ({names}) VALUES ({marks})" + self._conflict_sql()
+        groups = ", ".join("(" + ", ".join(ctx.add(v) for v in r.values()) + ")" for r in self._rows or [row])
+        sql = f"INSERT INTO {self._table()} ({names}) VALUES {groups}" + self._conflict_sql()
         return sql + self._tail()
 
     def _conflict_sql(self) -> str:
@@ -344,10 +603,26 @@ class Upsert(Insert[M]):
         self._check_columns(columns)
         return self._replace(_conflict=tuple(columns))
 
+    def _check_repeats(self) -> None:
+        """Raise `KorbaseError` if two rows hold the same conflict-key values."""
+        seen: set[Any] = set()
+        for r in self._rows or ():
+            slots = [r.get(c) for c in self._conflict]
+            if not all(isinstance(v, Value) for v in slots):
+                return
+            try:
+                key = tuple(v.value for v in slots)  # type: ignore[union-attr]
+                if key in seen:
+                    raise KorbaseError(f"two rows have the same {', '.join(self._conflict)} value")
+                seen.add(key)
+            except TypeError:
+                return
+
     def _conflict_sql(self) -> str:
         """Return the `ON CONFLICT ... DO UPDATE` clause."""
         if not self._conflict:
             raise KorbaseError("upsert needs .on_conflict(...)")
+        self._check_repeats()
         skip = set(self._conflict) | set(self._meta.pk)
         keys = [k for k in self._row() if k not in skip]
         cl = ", ".join(quote_ident(c) for c in self._conflict)

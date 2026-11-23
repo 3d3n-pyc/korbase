@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from korbase._backend import Conn
@@ -21,9 +22,28 @@ _TABLES = (
 )
 
 
+@dataclass(frozen=True)
+class LiteTable(Table):
+    """A SQLite table that also records what a rebuild would drop: its triggers and any CHECK."""
+
+    triggers: tuple[str, ...] = ()
+    has_check: bool = False
+
+
 def _quote(name: str) -> str:
     """Quote an identifier read from `sqlite_schema`, doubling any quote character."""
     return '"' + name.replace('"', '""') + '"'
+
+
+async def _triggers(conn: Conn, table: str) -> tuple[str, ...]:
+    """Return the names of the triggers defined on one table."""
+    rows = await conn.fetch("SELECT name FROM sqlite_schema WHERE type = 'trigger' AND tbl_name = ?", [table], tuple)
+    return tuple(sorted(r[0] for r in rows))
+
+
+def _has_check(sql: str | None) -> bool:
+    """Return true when the stored `CREATE TABLE` text holds a `CHECK` token (a simple test, may over-report)."""
+    return re.search(r"\bCHECK\b", sql or "", re.IGNORECASE) is not None
 
 
 async def _pragma(conn: Conn, name: str, table: str) -> list[Any]:
@@ -137,7 +157,7 @@ async def inspect_sqlite(conn: Conn) -> Snapshot:
         names = _named_constraints(sql)
         pk = pks[name]
         uniques, indexes = await _keys(conn, name, names)
-        result[name] = Table(
+        result[name] = LiteTable(
             name=name,
             columns=tuple(cols[name][0]),
             pk=pk or None,
@@ -145,5 +165,7 @@ async def inspect_sqlite(conn: Conn) -> Snapshot:
             foreign_keys=tuple(await _foreign_keys(conn, name, names, pks)),
             uniques=tuple(uniques),
             indexes=tuple(indexes),
+            triggers=await _triggers(conn, name),
+            has_check=_has_check(sql),
         )
     return Snapshot(result)

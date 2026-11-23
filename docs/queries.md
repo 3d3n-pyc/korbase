@@ -71,6 +71,7 @@ changed = await db.run(update(User).set(age=37).where(id=1))   # int
 | Builder | `db.run()` gives | `db.first()` gives |
 |---|---|---|
 | `select`, `insert`, `upsert` | `list[User]` | `User \| None` |
+| `select(...).columns(...)` | `list[tuple]` | `tuple \| None` |
 | `update`, `delete` | `int`, the number of rows changed | not allowed |
 | `update` or `delete` with `.returning()` | `list[User]` | `User \| None` |
 
@@ -135,6 +136,112 @@ rows = await db.run(q)
 - `order_by()` takes `col.asc()`, `col.desc()` or a plain column (ascending).
 - `limit()` and `offset()` take an `int` or a `param(...)`.
 
+## Aggregates and grouping
+
+An aggregate turns many rows into one value: how many, the total, the
+average. Say you keep a to-do list, and you want the number of open tasks and
+their points for each list, biggest first:
+
+```python
+from korbase import cols, count, select
+
+T = cols(Task)
+
+per_list = (
+    select(Task)
+    .columns(T.list_id, count(), T.points.sum())
+    .where(done=False)
+    .group_by(T.list_id)
+    .having(count() > 1)
+    .order_by(count().desc())
+    .limit(3)
+)
+
+rows = await db.run(per_list)   # [(1, 3, 9)]: list 1 has 3 open tasks worth 9 points
+```
+
+This example uses a `Task` model with the fields `id`, `list_id`, `done` and
+`points`. On Postgres it sends this SQL:
+
+```sql
+SELECT "tasks"."list_id", count(*), sum("tasks"."points") FROM "tasks" WHERE "tasks"."done" = $1 GROUP BY "tasks"."list_id" HAVING count(*) > $2 ORDER BY count(*) DESC LIMIT $3
+```
+
+On SQLite the SQL is the same, with `?1`, `?2` and `?3` in place of `$1`,
+`$2` and `$3`.
+
+`columns()` replaces the whole row with the items you list, so each result
+is a tuple, in the order you gave. `group_by()` makes one row per value of the
+column. `having()` keeps only the groups that match, as `where()` keeps rows.
+`where()` runs first, on rows, and `having()` runs after, on groups.
+
+### The aggregates
+
+| Python | SQL | Result |
+|---|---|---|
+| `count()` | `count(*)` | `int`, the rows in the group |
+| `col.count()` | `count(col)` | `int`, the rows where `col` is not null |
+| `col.sum()` | `sum(col)` | the column type, or `None` |
+| `col.avg()` | `avg(col)` | always a `float`, or `None` |
+| `col.min()`, `col.max()` | `min(col)`, `max(col)` | the column type, or `None` |
+
+`sum`, `avg`, `min` and `max` give `None` when there is nothing to add up,
+and `count` gives `0`. Values come back as the column type, not as raw
+database values. `min()` of a `date` column is a `date`, also on SQLite,
+which stores dates as text. `avg` is a `float` on both databases: Postgres
+would otherwise return a `Decimal`, so Korbase casts it
+(`CAST(avg(col) AS DOUBLE PRECISION)`). SQLite already returns a float.
+
+An aggregate can go in `having()`, with `>`, `<`, `==` and the other
+operators, and in `order_by()`, with `.asc()` or `.desc()`.
+
+### One value
+
+`db.value()` runs a query that selects one column or aggregate, and returns
+that single value. It returns `None` when there is no row. A query with
+no `group_by()` always returns one row, so `count()` gives `0`, not `None`:
+
+```python
+open_tasks = await db.value(select(Task).columns(count()).where(done=False))
+best = await db.value(select(Task).columns(T.points.max()))   # int | None
+```
+
+For a `sum()` that you want as a number, write `... or 0`. For a `count()`
+you do not need it.
+
+With no `group_by()` and no row, `db.first()` still returns a tuple, for
+example `(0, None)`. With a `group_by()` and no row, there are no groups:
+`db.run()` returns `[]` and `db.first()` returns `None`.
+
+`db.value()` raises `KorbaseError` if the query does not select exactly one
+item.
+
+### What Korbase refuses
+
+These raise `KorbaseError` when the query is compiled, which happens the
+first time you run it:
+
+- `columns()` with nothing in it.
+- A plain column next to an aggregate, when the column is not in
+  `group_by()`. The database could not tell which value to show.
+- `having()` on a query with no aggregate and no `group_by()`.
+
+Two more limits:
+
+- `.load()` is not available on a `columns()` query. It has no rows of the
+  model to fill.
+- Postgres has no `min` or `max` for `uuid` columns, so `.min()` and `.max()`
+  on one fail in the database. It has none for `bool` columns either
+  (SQLite has).
+- SQLite sums `Decimal` columns as floating point, so round the result if you
+  need an exact amount.
+
+Aggregates also work over a join: see [Joins](relations.md#joins).
+
+The editor knows the type of each tuple for up to six items in `columns()`.
+Calling `columns()` again replaces the list, and clears `group_by()` and
+`having()`.
+
 ## Insert
 
 ```python
@@ -146,6 +253,50 @@ rows = await db.run(q)
   get the `id` the database chose. There is no `.returning()` on `insert`.
   `db.run()` gives a list with one row, and `[user] =` takes it out of the
   list. `db.first()` gives the row directly.
+
+### Insert many rows
+
+To write several rows at once, pass a list of dicts to `rows()`. Korbase
+sends one statement, not one per row.
+
+```python
+users = await db.run(insert(User).rows([
+    {"name": "Ada", "age": 36},
+    {"name": "Alan", "age": 41},
+]))
+# [User(id=1, name='Ada', age=36), User(id=2, name='Alan', age=41)]
+```
+
+Each dict uses the same keys as `values()`. A column left out of every dict
+gets its default. The rows come back in the order you gave them, with the
+values the database chose (such as `id`).
+
+The SQL for these two rows:
+
+```sql
+-- Postgres
+INSERT INTO "users" ("name", "age") VALUES ($1, $2), ($3, $4) RETURNING "id", "name", "age"
+-- SQLite
+INSERT INTO "users" ("name", "age") VALUES (?1, ?2), (?3, ?4) RETURNING "id", "name", "age"
+```
+
+Korbase raises `KorbaseError` when:
+
+- the list is empty;
+- the dicts do not all have the same keys (a column cannot be set for one
+  row and left to its default for another: use two inserts);
+- a key is not a column of the model;
+- the statement would bind more than 32766 values (rows times columns).
+  Split the list into batches:
+
+```python
+rows = [{"name": f"user{i}", "age": i} for i in range(20_000)]
+for start in range(0, len(rows), 5_000):
+    await db.run(insert(User).rows(rows[start : start + 5_000]))
+```
+
+`rows()` and `values()` replace each other: the last one you call wins.
+`rows()` also works on `upsert`, see below.
 
 ## Update and delete
 
@@ -178,6 +329,28 @@ insert, it always returns the written row.
 - The columns in the `SET` list are the inserted columns, minus the conflict
   columns and the primary key. The primary key is never rewritten.
 - If nothing is left to set, the upsert does nothing on conflict (`DO NOTHING`).
+
+To upsert many rows in one statement, use `rows()` as in
+[Insert many rows](#insert-many-rows):
+
+```python
+users = await db.run(
+    upsert(User)
+    .rows([{"id": 1, "name": "Ada", "age": 37}, {"id": 2, "name": "Alan", "age": 42}])
+    .on_conflict("id")
+)
+```
+
+```sql
+-- Postgres
+INSERT INTO "users" ("id", "name", "age") VALUES ($1, $2, $3), ($4, $5, $6) ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name", "age" = EXCLUDED."age" RETURNING "id", "name", "age"
+-- SQLite
+INSERT INTO "users" ("id", "name", "age") VALUES (?1, ?2, ?3), (?4, ?5, ?6) ON CONFLICT ("id") DO UPDATE SET "name" = EXCLUDED."name", "age" = EXCLUDED."age" RETURNING "id", "name", "age"
+```
+
+The same rules apply. One more: two rows with the same conflict key (here,
+the same `id`) raise `KorbaseError`, because the database could not tell
+which one should win.
 
 ## Typed columns
 
