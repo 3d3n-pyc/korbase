@@ -139,6 +139,7 @@ A `-- korbase:review` line stays above the `INSERT` when the copy can lose data 
 - **A column that becomes `NOT NULL`.** The copy fails if any row holds `NULL`.
 - **A dropped column.** Its data is gone.
 - **A new `NOT NULL` column without a default.** The copy fails if the table has rows.
+- **Objects korbase does not manage.** A rebuild drops the table's hand-made indexes, its triggers and its `CHECK` constraints. Each one gets a review line naming it: recreate it at the end of the file, then delete the line.
 
 `apply` refuses the file until you delete these lines. Before you do, look at your data.
 

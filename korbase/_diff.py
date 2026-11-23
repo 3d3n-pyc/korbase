@@ -202,11 +202,21 @@ def _copy_sql(cur: Table, des: Table, temp: str) -> str:
     return f"INSERT INTO {quote_ident(temp)} ({names}) SELECT {', '.join(picks)} FROM {quote_ident(cur.name)}"
 
 
+def _lost_reviews(cur: Table, des: Table) -> tuple[str, ...]:
+    """Return a review line per object the rebuild drops: unmanaged indexes, triggers, CHECK constraints."""
+    t, kept = des.name, {i.name for i in des.indexes}
+    out = [f'index "{i.name}"' for i in cur.indexes if i.name not in kept]
+    out += [f'trigger "{n}"' for n in getattr(cur, "triggers", ())]
+    if getattr(cur, "has_check", False):
+        out.append("CHECK constraint")
+    return tuple(_review(f'{what} on "{t}" is dropped by this rebuild; recreate it below') for what in out)
+
+
 def _rebuild_table(cur: Table, des: Table) -> list[Change]:
     """Return the changes that rebuild a SQLite table: new table, copy, drop, rename, indexes."""
     temp = f"{des.name}__new"
     create = _create_table(replace(des, name=temp, indexes=()), LITE)[0].sql
-    steps: list[tuple[str, tuple[str, ...]]] = [(create, ())]
+    steps: list[tuple[str, tuple[str, ...]]] = [(create, _lost_reviews(cur, des))]
     if any(c.name in {o.name for o in cur.columns} for c in des.columns):
         steps.append((_copy_sql(cur, des, temp), _copy_reviews(cur, des)))
     steps.append((f"DROP TABLE {quote_ident(cur.name)}", ()))

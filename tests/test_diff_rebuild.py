@@ -121,3 +121,29 @@ def test_generated_sql_keeps_rows(tmp_path: Path):
     ]
     assert con.execute("SELECT name FROM sqlite_master WHERE name = 'a_x_part'").fetchone() is not None
     assert con.execute("SELECT name FROM sqlite_master WHERE name LIKE '%__new'").fetchone() is None
+
+
+def _lost_rebuild(**kw) -> str:
+    """Return the rebuild of a table whose current side is a `LiteTable` with the given extras."""
+    from korbase._inspect_sqlite import LiteTable
+
+    x = Column("x", "TEXT", False, None, False)
+    cur = LiteTable("a", (ID, x), ("id",), "a_pkey", **kw)
+    return lite((cur,), (tbl("a", Column("x", "TEXT", False, "''", False)),))
+
+
+def test_rebuild_reviews_hand_index():
+    idx = (Index("hand_idx", ("x",), False, None),)
+    assert 'korbase:review index "hand_idx" on "a" is dropped by this rebuild' in _lost_rebuild(indexes=idx)
+
+
+def test_rebuild_reviews_trigger():
+    assert 'korbase:review trigger "hand_trg" on "a" is dropped' in _lost_rebuild(triggers=("hand_trg",))
+
+
+def test_rebuild_reviews_check():
+    assert 'korbase:review CHECK constraint on "a" is dropped' in _lost_rebuild(has_check=True)
+
+
+def test_rebuild_without_lost_objects_has_no_review():
+    assert "korbase:review" not in _lost_rebuild()
