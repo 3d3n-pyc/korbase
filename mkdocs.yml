@@ -70,6 +70,7 @@ plugins:
           - queries.md: select, insert, update, delete, upsert, and how they compile to SQL
           - relations.md: Foreign keys, relations and how to load them
           - transactions.md: Transactions, and raw SQL with parameters
+          - errors.md: The exceptions korbase raises, constraint names, retrying a busy database
           - migrations.md: Reviewed SQL migration files, make and apply
           - korvex.md: Plugging korbase into a Korvex app
           - sqlite.md: SQLite backend, its DSN, stored values, locking, migrations and table rebuilds
@@ -87,6 +88,7 @@ nav:
       - Queries: queries.md
       - Relations: relations.md
       - Transactions and raw SQL: transactions.md
+      - Errors: errors.md
       - Migrations: migrations.md
       - Korvex integration: korvex.md
       - SQLite: sqlite.md

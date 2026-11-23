@@ -72,11 +72,7 @@ rows = await db.fetch("SELECT id, ok FROM tasks WHERE ok = ? AND id > ?", True, 
 
 `db.transaction()` runs `BEGIN IMMEDIATE`, so it takes the write lock at once, not at the first write. A transaction inside one is a [savepoint](glossary.md#savepoint), as on Postgres. An error [rolls back](glossary.md#rollback) the block.
 
-Only one process writes at a time. A second writer waits for `busy_timeout_ms`, then fails with the error SQLite gives, which korbase does not change:
-
-```
-sqlite3.OperationalError: database is locked
-```
+Only one process writes at a time. A second writer waits for `busy_timeout_ms`, then fails with `korbase.DatabaseBusy`. The original `sqlite3.OperationalError: database is locked` is on `__cause__`. The transaction did not run, so you can retry it (see [Errors](errors.md#retry-when-the-database-is-busy)).
 
 Keep write transactions short, and do slow work (network calls, for example) outside them. Raise `busy_timeout_ms` if short waits are normal for your load. Several processes can share one file, each with its own `Database`: that is safe, and the tests do it with two writers at once.
 

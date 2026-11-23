@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from korbase import Database
+from korbase._errors import DatabaseBusy
 
 _ROWS = 25
 
@@ -102,10 +103,10 @@ async def _busy_timeout(tmp_path: Path) -> None:
     async with await Database.connect(_dsn(path)) as a, await Database.connect(_dsn(path), busy_timeout_ms=50) as b:
         async with a.transaction() as tx:
             await tx.execute("INSERT INTO t (who) VALUES ('a')")
-            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            with pytest.raises(DatabaseBusy):
                 async with b.transaction():
                     pass
-            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+            with pytest.raises(DatabaseBusy):
                 await b.execute("INSERT INTO t (who) VALUES ('b')")
         await b.execute("INSERT INTO t (who) VALUES ('b')")
         assert await a.fetch("SELECT who FROM t ORDER BY id") == [("a",), ("b",)]

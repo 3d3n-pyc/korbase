@@ -4,14 +4,9 @@ from __future__ import annotations
 
 import re
 
+from korbase._errors import KorbaseError
+
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,62}")
-
-
-class KorbaseError(Exception):
-    """Base class for every error Korbase raises.
-
-    It lives here for now, until a dedicated errors module exists.
-    """
 
 
 def validate_ident(name: str) -> str:
