@@ -32,6 +32,12 @@ _SQLITE_TYPES: dict[Any, str] = {
 }
 
 
+_PG_ARITH_CASTS: dict[type, str] = {float: "::float8", Decimal: "::numeric"}
+_SQLITE_DECIMAL_ARITH = (
+    "arithmetic on Decimal values is not supported on SQLite, which stores them as text and computes in floating point"
+)
+
+
 def _strip_optional(tp: Any) -> Any:
     """Return `X` for `Optional[X]` / `X | None`, else `tp` unchanged."""
     if typing.get_origin(tp) in (typing.Union, types.UnionType):
@@ -144,6 +150,21 @@ class Dialect:
     def placeholder(self, n: int) -> str:
         """Return the numbered parameter marker: `$n` (Postgres) or `?n` (SQLite)."""
         return f"{self.placeholder_prefix}{n}"
+
+    def arith_operand(self, placeholder: str, value: object) -> str:
+        """Return the SQL for a plain value used in arithmetic.
+
+        Postgres casts floats and decimals so they are not coerced to the
+        other operand's type. Anything but a number raises `KorbaseError`.
+        """
+        kind = type(value)
+        if kind is int or (kind is float and self.name != "postgres"):
+            return placeholder
+        if self.name == "postgres" and kind in _PG_ARITH_CASTS:
+            return f"{placeholder}{_PG_ARITH_CASTS[kind]}"
+        if kind is Decimal:
+            raise KorbaseError(_SQLITE_DECIMAL_ARITH)
+        raise KorbaseError(f"arithmetic needs a number, not {kind.__name__}")
 
     def any_of(self, column_sql: str, ph: str) -> str:
         """Return the SQL testing that a column equals one of an array parameter.
