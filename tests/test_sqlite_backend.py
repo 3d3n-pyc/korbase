@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import sys
 import threading
 from pathlib import Path
 
@@ -237,3 +238,16 @@ def test_tag_skips_leading_comments() -> None:
 
     assert _tag("-- why\n/* note */ UPDATE t SET x = 1", 2) == "UPDATE 2"
     assert _tag("  /* a\nb */\n-- c\nINSERT INTO t VALUES (1)", 1) == "INSERT 0 1"
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="autocommit needs Python 3.12+")
+def test_connection_uses_autocommit() -> None:
+    """On Python 3.12+ the connection is opened with `autocommit=True`."""
+
+    async def run() -> None:
+        pool = await SqliteBackend().connect("sqlite::memory:")
+        async with pool.acquire() as c:
+            assert await c._run(lambda: c._conn().autocommit) is True  # type: ignore[attr-defined]
+        await pool.close()
+
+    asyncio.run(run())
