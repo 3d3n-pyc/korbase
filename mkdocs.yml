@@ -98,6 +98,7 @@ nav:
       - korbase: reference/korbase.md
       - korbase.migrate: reference/migrate.md
       - korbase.korvex: reference/korvex.md
+  - Benchmarks: benchmarks.md
   - AI: ai.md
   - More:
       - Changelog: https://github.com/3d3n-pyc/korbase/blob/main/CHANGELOG.md
