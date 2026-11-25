@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import sqlite3
+import sys
 from collections.abc import AsyncIterator, Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -28,6 +29,9 @@ __all__ = ["SqliteBackend"]
 
 T = TypeVar("T")
 _MIN_VERSION = (3, 35)
+# Python 3.12+ controls transactions with `autocommit`; the legacy
+# `isolation_level` is ignored once its default changes. 3.10/3.11 lack it.
+_CONNECT_KWARGS: dict[str, Any] = {"autocommit": True} if sys.version_info >= (3, 12) else {"isolation_level": None}
 _MEMORY = ":memory:"
 
 
@@ -165,7 +169,7 @@ class _SqliteConn:
 
     def _open(self) -> None:
         """Open the sqlite3 connection (worker thread)."""
-        db = sqlite3.connect(self._path, isolation_level=None)
+        db = sqlite3.connect(self._path, **_CONNECT_KWARGS)
         if self._path != _MEMORY:
             db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA foreign_keys=ON")

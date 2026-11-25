@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+from pathlib import Path
 from typing import Annotated, Optional, TypedDict
 
 import msgspec
 import pytest
 
+from korbase import Database
 from korbase._asyncpg import AsyncpgBackend
 from korbase._build import named_builder, positional_builder, validating_builder
 from korbase._ident import KorbaseError
@@ -239,3 +241,32 @@ def test_positional_rel_declared_first() -> None:
 def test_named_init_false_field() -> None:
     obj = named_builder(InitFalse, ["name", "id"])(("a", 1))
     assert (obj.id, obj.name) == (1, "a")
+
+
+@table("kw_items")
+class KwDefaults(msgspec.Struct, kw_only=True):
+    a: int = 1
+    b: Annotated[int, PK()]
+    c: int = 3
+
+
+def test_named_reports_missing_required_kw_only_field() -> None:
+    """A required kw_only field after defaulted ones is still required."""
+    with pytest.raises(KorbaseError, match="missing columns for KwDefaults: b"):
+        named_builder(KwDefaults, ["a", "c"])
+
+
+@pytest.mark.parametrize("validate", [False, True])
+def test_sqlite_select_builds_kw_only_struct(tmp_path: Path, validate: bool) -> None:
+    """Rows from SQLite build kw_only structs correctly, positional or validating."""
+
+    async def main() -> None:
+        """Create a table, insert a row and read it back."""
+        dsn = f"sqlite:///{tmp_path / 'kw.db'}"
+        async with await Database.connect(dsn, validate=validate) as db:
+            await db.execute("CREATE TABLE kw_items (a INTEGER, b INTEGER, c INTEGER)")
+            await db.execute("INSERT INTO kw_items (a, b, c) VALUES (10, 20, 30)")
+            rows = await db.fetch("SELECT a, b, c FROM kw_items", model=KwDefaults)
+            assert rows == [KwDefaults(a=10, b=20, c=30)]
+
+    asyncio.run(main())

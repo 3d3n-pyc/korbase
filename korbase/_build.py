@@ -130,9 +130,9 @@ def _field_names(model: type) -> tuple[list[str], set[str]]:
     if meta.kind == "typeddict":
         return names, set(model.__required_keys__)  # type: ignore[attr-defined]
     if meta.kind == "struct":
-        fields = model.__struct_fields__  # type: ignore[attr-defined]
-        n_default = len(model.__struct_defaults__)  # type: ignore[attr-defined]
-        return names, set(fields[: len(fields) - n_default])
+        import msgspec
+
+        return names, {f.name for f in msgspec.structs.fields(model) if f.required}
     required = {
         f.name
         for f in dataclasses.fields(model)  # type: ignore[arg-type]

@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A msgspec `Struct` with `kw_only=True` and a default before a required field no longer hides that field: a missing column is reported. Required fields come from `msgspec.structs.fields`.
+- An error while the Postgres pool takes a connection back is raised as a korbase error, and never hides the exception that left the `async with` block.
+- `Database.close()` on Postgres waits at most 10 seconds for connections still in use, then closes them, as asyncpg advises.
+- A closing pool or a released connection raises `ConnectionFailed` on Postgres.
+
+### Changed
+
+- SQLite connections use `autocommit=True` on Python 3.12 and later, the setting Python documents for code that runs its own `BEGIN`. Python 3.10 and 3.11 keep `isolation_level=None`. To update: nothing.
+
 ## 0.1.0a4
 
 ### Changed (breaking)

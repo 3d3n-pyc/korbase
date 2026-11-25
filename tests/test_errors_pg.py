@@ -19,9 +19,11 @@ from korbase import (
     ForeignKeyViolation,
     NotNullViolation,
     UniqueViolation,
+    _asyncpg,
     insert,
     table,
 )
+from korbase._asyncpg import AsyncpgBackend, _translate
 
 SCHEMA = [
     "DROP TABLE IF EXISTS kbe_child, kbe_users, kbe_defer CASCADE",
@@ -167,3 +169,62 @@ def test_command_timeout_has_a_message(dsn: str) -> None:
             assert isinstance(info.value.__cause__, asyncio.TimeoutError)
 
     asyncio.run(main())
+
+
+def _break_reset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the connection reset, run on release, fail as if the backend had been killed."""
+
+    async def reset(self: Any, *, timeout: float | None = None) -> None:
+        raise asyncpg.ConnectionDoesNotExistError("connection was closed in the middle of operation")
+
+    monkeypatch.setattr(asyncpg.Connection, "reset", reset)
+
+
+def test_failed_release_is_a_korbase_error(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def main() -> None:
+        pool = await AsyncpgBackend().connect(dsn, min_size=1, max_size=1)
+        try:
+            with pytest.raises(ConnectionFailed) as info:
+                async with pool.acquire():
+                    _break_reset(monkeypatch)
+            assert isinstance(info.value.__cause__, asyncpg.ConnectionDoesNotExistError)
+        finally:
+            await pool.close()
+
+    asyncio.run(main())
+
+
+def test_body_error_wins_over_release_failure(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def main() -> None:
+        pool = await AsyncpgBackend().connect(dsn, min_size=1, max_size=1)
+        try:
+            with pytest.raises(RuntimeError, match="boom"):
+                async with pool.acquire():
+                    _break_reset(monkeypatch)
+                    raise RuntimeError("boom")
+        finally:
+            await pool.close()
+
+    asyncio.run(main())
+
+
+def test_close_does_not_wait_forever(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_asyncpg, "_CLOSE_TIMEOUT", 0.2)
+
+    async def main() -> None:
+        pool = await AsyncpgBackend().connect(dsn, min_size=1, max_size=1)
+        async with pool.acquire():
+            await asyncio.wait_for(pool.close(), 5)
+
+    asyncio.run(main())
+
+
+def test_pool_closing_is_connection_failed() -> None:
+    """asyncpg's "pool is closing" InterfaceError becomes ConnectionFailed.
+
+    Tested on the mapping itself: racing a real close() against acquire()
+    depends on how many loop turns asyncio.wait_for takes, which differs
+    before Python 3.12.
+    """
+    err = _translate(asyncpg.InterfaceError("pool is closing"))
+    assert isinstance(err, ConnectionFailed)
