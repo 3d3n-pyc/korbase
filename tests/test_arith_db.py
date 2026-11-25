@@ -82,6 +82,38 @@ def test_set_with_param(backend_dsn: str) -> None:
     run_db(body, backend_dsn)
 
 
+def test_param_types_checked_at_run(backend_dsn: str) -> None:
+    async def body(db: Database) -> None:
+        q = select(Acct).columns(c.balance * param("rate")).where(id=1)
+        with pytest.raises(KorbaseError, match="rate"):
+            await db.run(q, rate=1.5)
+        with pytest.raises(KorbaseError, match="rate"):
+            await db.run(q, rate=True)
+        with pytest.raises(KorbaseError, match="rate"):
+            await db.run(q, rate=Decimal("1.5"))
+        assert await db.value(q, rate=2) == 200
+
+    run_db(body, backend_dsn)
+
+
+def test_float_param_on_float_column(backend_dsn: str) -> None:
+    async def body(db: Database) -> None:
+        q = select(Acct).columns(c.ratio * param("k")).where(id=1)
+        assert await db.value(q, k=1.5) == 3.0
+        assert await db.value(q, k=2) == 4.0
+
+    run_db(body, backend_dsn)
+
+
+def test_param_reused_in_where_and_arith(backend_dsn: str) -> None:
+    async def body(db: Database) -> None:
+        q = update(Acct).set(balance=c.balance + param("n")).where(qty=param("n"))
+        assert await db.run(q, n=3) == 1
+        assert await db.value(select(Acct).columns(c.balance).where(id=2)) == 53
+
+    run_db(body, backend_dsn)
+
+
 def test_where_arith(backend_dsn: str) -> None:
     async def body(db: Database) -> None:
         rows = await db.run(select(Acct).where(c.qty * c.price > 100))

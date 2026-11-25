@@ -78,6 +78,7 @@ class ParamCollector:
         self.dialect = dialect
         self.items: list[Union[Param, Value]] = []
         self._named: dict[str, int] = {}
+        self.arith: dict[str, tuple[type, ...]] = {}
 
     def add(self, item: Union[Param, Value], eq: bool = False) -> str:
         """Register `item` and return its placeholder.
@@ -218,14 +219,37 @@ def _result_type(op: str, left: Any, right: Any) -> Any:
     return float if float in (left, right) else Decimal if Decimal in (left, right) else int
 
 
-def _arith_sql(node: Any, ctx: ParamCollector) -> str:
-    """Compile an arithmetic operand: values go through the dialect, never inline."""
+def _allowed_param_types(tp: Any, dialect: Dialect) -> tuple[type, ...]:
+    """Return the Python types a param may have next to a `tp` operand."""
+    if tp is float:
+        return (int, float)
+    if tp is Decimal and dialect.name != "sqlite":
+        return (int, Decimal)
+    return (int,)
+
+
+def _arith_param(node: Param, ctx: ParamCollector, other: Any) -> str:
+    """Compile a param operand: record its allowed types, cast it on Postgres."""
+    placeholder = ctx.add(node)
+    allowed = _allowed_param_types(other, ctx.dialect)
+    known = ctx.arith.get(node.name)
+    ctx.arith[node.name] = allowed if known is None else tuple(t for t in known if t in allowed)
+    if ctx.dialect.name == "postgres" and other in (float, Decimal):
+        return placeholder + ("::float8" if other is float else "::numeric")
+    return placeholder
+
+
+def _arith_sql(node: Any, ctx: ParamCollector, other: Any = None) -> str:
+    """Compile an arithmetic operand: values go through the dialect, never inline.
+
+    `other` is the number type of the operand on the other side.
+    """
     if isinstance(node, Column) and ctx.dialect.name == "sqlite" and _numeric_type(node) is Decimal:
         raise KorbaseError(_SQLITE_DECIMAL)
     if isinstance(node, Expr):
         return node.compile(ctx)
     if isinstance(node, Param):
-        return ctx.add(node)
+        return _arith_param(node, ctx, other)
     return ctx.dialect.arith_operand(ctx.add(Value(node)), node)
 
 
@@ -488,7 +512,12 @@ class Arith(Expr, _ArithOps[T]):
         self.op = op
         self.left = left
         self.right = right
-        self.py_type = _result_type(op, _operand_type(left), _operand_type(right))
+        left_type, right_type = _operand_type(left), _operand_type(right)
+        if isinstance(left, Param):
+            left_type = right_type
+        elif isinstance(right, Param):
+            right_type = left_type
+        self.py_type = _result_type(op, left_type, right_type)
 
     @property
     def columns(self) -> tuple[Column[Any], ...]:
@@ -503,7 +532,8 @@ class Arith(Expr, _ArithOps[T]):
 
     def compile(self, ctx: ParamCollector) -> str:
         """Return `(left op right)`, always parenthesised."""
-        return f"({_arith_sql(self.left, ctx)} {self.op} {_arith_sql(self.right, ctx)})"
+        left = _arith_sql(self.left, ctx, _operand_type(self.right))
+        return f"({left} {self.op} {_arith_sql(self.right, ctx, _operand_type(self.left))})"
 
     def __eq__(self, other: T | Arith[T] | Param | None) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
         """`expr == x` is SQL `=`; `expr == None` is `IS NULL`."""

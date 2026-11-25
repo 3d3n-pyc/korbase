@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from typing import Any, Generic, Optional, TypeVar, Union, overload
 
@@ -75,6 +75,7 @@ class Compiled:
     slots: tuple[Slot, ...]
     outputs: tuple[Optional[Column[Any]], ...] = ()
     parts: tuple[JoinPart, ...] = ()
+    arith: tuple[tuple[str, tuple[type, ...]], ...] = ()
 
 
 class _Query(Generic[M]):
@@ -129,7 +130,7 @@ class _Query(Generic[M]):
         """Build the `Compiled` of this query for `dialect`."""
         ctx = ParamCollector(dialect)
         sql = self._build(ctx)
-        return Compiled(sql, tuple(ctx.items))
+        return Compiled(sql, tuple(ctx.items), arith=tuple(ctx.arith.items()))
 
     def _table(self) -> str:
         """Return the quoted table name."""
@@ -370,7 +371,7 @@ class SelectJoin(_Ordered[Any], Generic[R]):
     def _compile_for(self, dialect: Dialect) -> Compiled:
         """Build the `Compiled` of this query, with the slice of each model."""
         done = super()._compile_for(dialect)
-        return Compiled(done.sql, done.slots, (), parts_of(self._meta, self._joins))
+        return replace(done, parts=parts_of(self._meta, self._joins))
 
 
 def check_query(query: Any) -> None:
@@ -464,7 +465,7 @@ class SelectColumns(_Ordered[Any], Generic[R]):
     def _compile_for(self, dialect: Dialect) -> Compiled:
         """Build the `Compiled` of this query, with the per-item decode columns."""
         done = super()._compile_for(dialect)
-        return Compiled(done.sql, done.slots, tuple(_source(c) for c in self._columns))
+        return replace(done, outputs=tuple(_source(c) for c in self._columns))
 
 
 def _used_columns(item: Any) -> tuple[Column[Any], ...]:

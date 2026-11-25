@@ -51,7 +51,19 @@ def _args(compiled: Compiled, params: dict[str, Any]) -> list[Any]:
         raise KorbaseError(f"unexpected params: {', '.join(extra)}")
     if any(v is None for v in params.values()):
         _reject_null_eq(compiled, params)
+    for name, allowed in compiled.arith:
+        _check_arith_param(name, params[name], allowed)
     return [params[s.name] if isinstance(s, Param) else s.value for s in compiled.slots]
+
+
+def _check_arith_param(name: str, value: Any, allowed: tuple[type, ...]) -> None:
+    """Raise if `value` is not of a type `allowed` next to the column it is used with."""
+    kind = type(value)
+    if kind not in allowed:
+        raise KorbaseError(
+            f"param {name!r} is a {kind.__name__}, but it is used in arithmetic with a column "
+            f"that only takes {' or '.join(t.__name__ for t in allowed) or 'nothing'}"
+        )
 
 
 def _reject_null_eq(compiled: Compiled, params: dict[str, Any]) -> None:

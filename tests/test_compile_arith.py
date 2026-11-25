@@ -104,10 +104,9 @@ def test_set_wider_result_refused() -> None:
         update(Account).set(balance=A.balance * 1.5)
 
 
-def test_set_unknown_type_refused() -> None:
-    """An expression of unknown type is refused."""
-    with pytest.raises(KorbaseError, match="matching expression"):
-        update(Account).set(balance=A.balance * param("rate"))
+def test_set_param_arith_accepted() -> None:
+    """A param takes the column's type, so the expression type is known."""
+    update(Account).set(balance=A.balance * param("rate"))
 
 
 def test_set_order_refused() -> None:
@@ -122,3 +121,30 @@ def test_columns_arith_needs_group_by() -> None:
 
     with pytest.raises(KorbaseError):
         select(Account).columns(A.balance * 2, count()).compile(PG)
+
+
+@table("items")
+@dataclass
+class Item:
+    id: Annotated[int, PK()]
+    n: int
+    f: float
+
+
+I: Any = cols(Item)  # noqa: E741
+
+
+def test_param_takes_column_type() -> None:
+    assert (I.n + param("n")).py_type is int
+    assert (param("n") * I.f).py_type is float
+    update(Item).set(n=I.n + param("n"))
+
+
+def test_param_cast_on_postgres_float_column() -> None:
+    assert "$1::float8" in select(Item).columns(I.f * param("k")).compile(PG).sql
+    assert "::" not in select(Item).columns(I.n * param("k")).compile(PG).sql
+
+
+def test_param_allowed_types_recorded() -> None:
+    assert select(Item).columns(I.n * param("k")).compile(PG).arith == (("k", (int,)),)
+    assert select(Item).columns(I.f * param("k")).compile(SQLITE).arith == (("k", (int, float)),)
