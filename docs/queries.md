@@ -119,6 +119,7 @@ adults_or_named = select(User).where((U.age >= 18) | (U.name == "Ada"))
 ```
 
 Never `and`, `or` or `not`: see [Going further](#why-and-and-or-raise).
+For `+`, `-`, `*`, `/` and `%` on columns, see [Arithmetic](#arithmetic).
 
 ## Select
 
@@ -315,6 +316,110 @@ removed = await db.run(delete(User).where(id=1))
 ```python
 [old] = await db.run(delete(User).where(id=1).returning())
 ```
+
+## Arithmetic
+
+You can add, subtract, multiply, divide and take the remainder of columns
+with `+`, `-`, `*`, `/` and `%`. The classic case is a balance that goes
+down by 10, which the database must do in one step so that two requests
+cannot overwrite each other:
+
+```python
+from korbase import cols, param, select, update
+
+A = cols(Account)
+
+await db.run(update(Account).set(balance=A.balance - 10).where(id=1))
+```
+
+This example uses an `Account` model with the fields `id` and `balance`, and
+a `Line` model with `id`, `qty` and `price`. On Postgres it sends this SQL:
+
+```sql
+UPDATE "accounts" SET "balance" = ("accounts"."balance" - $1) WHERE "accounts"."id" = $2
+```
+
+On SQLite the SQL is the same, with `?1` and `?2`. The `10` is a bound value,
+like any other value in Korbase: it is never pasted into the SQL text. Each
+operation is wrapped in parentheses, so the order you wrote is the order the
+database uses.
+
+An arithmetic expression can go in four places:
+
+```python
+L = cols(Line)
+
+# a condition, in where(): compare it with something
+big = await db.run(select(Line).where(L.qty * L.price > 100))
+
+# a result column, in columns(): each row is a tuple
+totals = await db.run(select(Line).columns(L.id, L.qty * L.price))   # [(1, 60), (2, 150)]
+
+# a sort key, in order_by()
+by_size = await db.run(select(Line).order_by((L.qty + L.price).desc()))
+
+# the new value of a column, in update().set()
+await db.run(update(Account).set(balance=A.balance * param("rate")).where(id=1), rate=2)
+```
+
+```sql
+SELECT "lines"."id", "lines"."qty", "lines"."price" FROM "lines" WHERE ("lines"."qty" * "lines"."price") > $1
+SELECT "lines"."id", ("lines"."qty" * "lines"."price") FROM "lines"
+SELECT "lines"."id", "lines"."qty", "lines"."price" FROM "lines" ORDER BY ("lines"."qty" + "lines"."price") DESC
+UPDATE "accounts" SET "balance" = ("accounts"."balance" * $1) WHERE "accounts"."id" = $2
+```
+
+An operand is a column, a plain value, or a `param(...)`. The value can be on
+the left too: `100 - L.qty` gives `($1 - "lines"."qty")`. Put parentheses
+around an expression before you call a method on it: `(L.qty + L.price).desc()`.
+
+### Types
+
+The result type follows the operands, and your editor knows it:
+
+| Operands | Result |
+|---|---|
+| `int` and `int` | `int` |
+| `float` with anything | `float` |
+| `Decimal` with `int` or `Decimal` | `Decimal` |
+| `%` | `int` only |
+
+A column that may be `None` gives a result that may be `None`: in SQL, NULL
+plus anything is NULL. A `str` column plus an `int` is an error in pyright
+before you run anything.
+
+Division follows the database. Two integers give an integer, and the
+fraction is dropped: `7 / 2` is `3` on both Postgres and SQLite. To get a
+fraction, use a float: `L.qty / 2.0`.
+
+On Postgres, a float value is sent with a cast, `$1::float8`, and a `Decimal`
+with `$1::numeric`, so the database never has to guess the type.
+
+### Dividing by zero
+
+The two databases differ. Postgres stops the query, and `db.run()` raises
+`korbase.DatabaseError`. SQLite does not fail: the result is `NULL`, which
+comes back as `None`. If the divisor can be zero, check for it in `where()`,
+or test the value in Python.
+
+### What Korbase refuses
+
+These raise `KorbaseError`:
+
+- Arithmetic on a column that is not a number: `str`, `bool`, dates, `UUID`
+  and JSON columns.
+- `%` with a float or a `Decimal`.
+- A `Decimal` column or value on SQLite. SQLite stores a `Decimal` as text and
+  would compute in floating point, so the result could be off by a cent.
+  Use Postgres, or store whole cents in an `int` field.
+- An expression in `insert()` or `upsert()` values. They take plain values
+  and `param(...)`. To compute from the old value, use `update()`.
+- A column of another table in `update().set()`. The new value can use only
+  the columns of the table you update.
+- An expression alone in `where()`. Compare it: `.where(L.qty + 1 > 3)`.
+- An expression in `group_by()`. It takes columns only.
+
+Adding or subtracting a `timedelta` on a date column is not supported yet.
 
 ## Upsert
 
