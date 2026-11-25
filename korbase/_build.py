@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 from korbase._backend import RowBuilder
 from korbase._dialect import PG, Dialect, _strip_optional
+from korbase._expr import Arith
 from korbase._ident import KorbaseError
 from korbase._meta import TableMeta, table_meta
 
@@ -203,6 +204,8 @@ def _item_decoder(item: Any, column: Any, dialect: Dialect) -> Any:
     """Return the function that decodes one selected item, or None to keep the value."""
     if getattr(item, "kind", None) == "avg":
         return _to_float
+    if isinstance(item, Arith):
+        return {int: _to_int, float: _to_float}.get(item.py_type)
     if column is None:
         return None
     tp = _strip_optional(next(c.python_type for c in column.table.columns if c.name == column.name))
