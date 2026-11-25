@@ -23,7 +23,7 @@ from korbase import (
     insert,
     table,
 )
-from korbase._asyncpg import AsyncpgBackend
+from korbase._asyncpg import AsyncpgBackend, _translate
 
 SCHEMA = [
     "DROP TABLE IF EXISTS kbe_child, kbe_users, kbe_defer CASCADE",
@@ -219,14 +219,12 @@ def test_close_does_not_wait_forever(dsn: str, monkeypatch: pytest.MonkeyPatch) 
     asyncio.run(main())
 
 
-def test_pool_closing_is_connection_failed(dsn: str) -> None:
-    async def main() -> None:
-        pool = await AsyncpgBackend().connect(dsn, min_size=1, max_size=1)
-        closing = asyncio.ensure_future(pool.close())
-        await asyncio.sleep(0)
-        with pytest.raises(ConnectionFailed):
-            async with pool.acquire():
-                pass
-        await closing
+def test_pool_closing_is_connection_failed() -> None:
+    """asyncpg's "pool is closing" InterfaceError becomes ConnectionFailed.
 
-    asyncio.run(main())
+    Tested on the mapping itself: racing a real close() against acquire()
+    depends on how many loop turns asyncio.wait_for takes, which differs
+    before Python 3.12.
+    """
+    err = _translate(asyncpg.InterfaceError("pool is closing"))
+    assert isinstance(err, ConnectionFailed)
