@@ -5,6 +5,7 @@
 ### Added
 
 - Arithmetic on columns: `+`, `-`, `*`, `/` and `%` in `update().set()`, `where()`, `select().columns()` and `order_by()`, such as `update(Account).set(balance=c.balance - 10)` and `.where(c.qty * c.price > 100)`. Operands are columns, plain values, `param()` and reversed values (`10 - c.x`). The SQL is always in parentheses and values are always bound (on Postgres a float is sent as `$n::float8` and a `Decimal` as `$n::numeric`). Types follow the operands (`int` with `int` is `int`, a float gives `float`, `Decimal` with `int` or `Decimal` gives `Decimal`, `%` is `int` only, `None` is carried), and pyright rejects `str + int`. Integer division follows SQL (`7 / 2` is `3`); dividing by zero raises `DatabaseError` on Postgres and gives `NULL` on SQLite. `KorbaseError` for arithmetic on a `str`, `bool`, date, `UUID` or JSON column, `%` with a float or `Decimal`, a `Decimal` column or value on SQLite, an expression in `insert` or `upsert` values, a column of another table in `update().set()`, a bare expression in `where()`, and an expression in `group_by()`. No `date` plus `timedelta` yet. No upgrade needed. See `docs/queries.md`.
+- A benchmark of korbase against raw asyncpg and raw sqlite3 (`benches/perf_check.py`), run on every pull request against its base and reported in the job summary. See `docs/benchmarks.md`. No upgrade needed.
 
 ## 0.1.0a5
 
