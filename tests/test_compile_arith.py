@@ -47,9 +47,9 @@ def test_set_arith(d: Any) -> None:
 
 @pytest.mark.parametrize("d", DIALECTS)
 def test_set_arith_param_returning(d: Any) -> None:
-    q = update(Account).set(balance=A.balance + param("n")).where(id=param("i")).returning()
+    q = update(Account).set(balance=A.balance + 5).where(id=param("i")).returning()
     c = q.compile(d)
-    assert [s.name for s in c.slots] == ["n", "i"]
+    assert [getattr(s, "name", None) for s in c.slots] == [None, "i"]
     assert c.sql.endswith("RETURNING *") or "RETURNING" in c.sql
 
 
@@ -96,3 +96,29 @@ def test_order_by_arith_desc(d: Any) -> None:
     assert sql.endswith('ORDER BY ("accounts"."balance" - "accounts"."qty") DESC')
     sql = select(Account).columns(A.id).order_by(A.balance * 2).compile(d).sql
     assert "ORDER BY" in sql
+
+
+def test_set_wider_result_refused() -> None:
+    """A float result cannot be stored in an int column."""
+    with pytest.raises(KorbaseError):
+        update(Account).set(balance=A.balance * 1.5)
+
+
+def test_set_unknown_type_refused() -> None:
+    """An expression of unknown type is refused."""
+    with pytest.raises(KorbaseError, match="matching expression"):
+        update(Account).set(balance=A.balance * param("rate"))
+
+
+def test_set_order_refused() -> None:
+    """An ordering is not a value."""
+    with pytest.raises(KorbaseError):
+        update(Account).set(balance=A.balance.asc())
+
+
+def test_columns_arith_needs_group_by() -> None:
+    """A column read inside arithmetic must be grouped like a plain column."""
+    from korbase._expr import count
+
+    with pytest.raises(KorbaseError):
+        select(Account).columns(A.balance * 2, count()).compile(PG)

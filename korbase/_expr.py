@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeVar, Union, overload
+from typing import TYPE_CHECKING, Annotated, Any, Generic, NoReturn, TypeVar, Union, get_args, get_origin, overload
 
 from korbase._dialect import PG, Dialect, _strip_optional
 from korbase._ident import KorbaseError, quote_ident, validate_ident
@@ -159,6 +159,25 @@ _NUMBERS = (int, float, Decimal)
 _SQLITE_DECIMAL = "arithmetic on Decimal columns is not supported on SQLite, which stores them as text"
 
 
+def _unwrap_number(tp: Any) -> Any:
+    """Strip `Optional`, `Annotated` and `NewType` layers off a column type."""
+    while True:
+        tp = _strip_optional(tp)
+        if get_origin(tp) is Annotated:
+            tp = get_args(tp)[0]
+        elif hasattr(tp, "__supertype__"):
+            tp = tp.__supertype__
+        else:
+            return tp
+
+
+def _condition(node: Any) -> Any:
+    """Return `node`, refusing an arithmetic expression where a condition is needed."""
+    if isinstance(node, Arith):
+        raise KorbaseError("an arithmetic expression is not a condition; compare it, e.g. (c.a + 1) > 0")
+    return node
+
+
 def _numeric_type(column: Column[Any]) -> Any:
     """Return the column's Python type (int, float or Decimal); refuse any other.
 
@@ -166,7 +185,7 @@ def _numeric_type(column: Column[Any]) -> Any:
     """
     for meta in column.table.columns:
         if meta.name == column.name:
-            tp = _strip_optional(meta.python_type)
+            tp = _unwrap_number(meta.python_type)
             if tp not in _NUMBERS:
                 name = getattr(tp, "__name__", str(tp))
                 raise KorbaseError(f"column {column.name!r} is {name}, not a number: it cannot be used in arithmetic")
@@ -192,6 +211,8 @@ def _result_type(op: str, left: Any, right: Any) -> Any:
     """
     if op == "%" and (float in (left, right) or Decimal in (left, right)):
         raise KorbaseError("% only works on integers, not floats or Decimals")
+    if {left, right} == {float, Decimal}:
+        raise KorbaseError("a Decimal cannot be combined with a float; use int or Decimal")
     if left is None or right is None:
         return None
     return float if float in (left, right) else Decimal if Decimal in (left, right) else int
@@ -233,6 +254,8 @@ if TYPE_CHECKING:
     # `-`, `*` and `/`. Overloads, tried in order: int with int gives int; a
     # float on either side gives float; a Decimal with int or Decimal gives
     # Decimal. `N1`/`N2` carry `None` from an Optional column to the result.
+    # Known limit: `bool` is an `int` subclass, so pyright accepts `bool_col + 1`
+    # and `c.n + True`; at runtime both raise KorbaseError.
     # `%` is int only; str and other combinations match nothing (type error).
 
     class _ArithOps(Generic[T_co]):
@@ -255,11 +278,11 @@ if TYPE_CHECKING:
         __sub__ = __mul__ = __truediv__ = __add__
 
         @overload
-        def __radd__(self: _ArithOps[int | N1], other: int) -> Arith[int | N1]: ...  # pyright: ignore[reportOverlappingOverload]
+        def __radd__(self: _ArithOps[int | N1], other: int | Param) -> Arith[int | N1]: ...  # pyright: ignore[reportOverlappingOverload]
         @overload
-        def __radd__(self: _ArithOps[float | N1], other: float) -> Arith[float | N1]: ...
+        def __radd__(self: _ArithOps[float | N1], other: float | Param) -> Arith[float | N1]: ...
         @overload
-        def __radd__(self: _ArithOps[Decimal | N1], other: int | Decimal) -> Arith[Decimal | N1]: ...
+        def __radd__(self: _ArithOps[Decimal | N1], other: int | Decimal | Param) -> Arith[Decimal | N1]: ...
         @overload
         def __radd__(self: _ArithOps[int | N1], other: Decimal) -> Arith[Decimal | N1]: ...
         def __radd__(self, other: Any) -> Any: ...
@@ -267,7 +290,7 @@ if TYPE_CHECKING:
         __rsub__ = __rmul__ = __rtruediv__ = __radd__
 
         def __mod__(self: _ArithOps[int | N1], other: int | Param | _ArithOps[int | N2]) -> Arith[int | N1 | N2]: ...
-        def __rmod__(self: _ArithOps[int | N1], other: int) -> Arith[int | N1]: ...
+        def __rmod__(self: _ArithOps[int | N1], other: int | Param) -> Arith[int | N1]: ...
 
 else:
 
@@ -581,8 +604,8 @@ class And(Expr):
 
     def __init__(self, left: Any, right: Any) -> None:
         """Build `left AND right`."""
-        self.left = left
-        self.right = right
+        self.left = _condition(left)
+        self.right = _condition(right)
 
     def compile(self, ctx: ParamCollector) -> str:
         """Return `(left AND right)`."""
@@ -596,8 +619,8 @@ class Or(Expr):
 
     def __init__(self, left: Any, right: Any) -> None:
         """Build `left OR right`."""
-        self.left = left
-        self.right = right
+        self.left = _condition(left)
+        self.right = _condition(right)
 
     def compile(self, ctx: ParamCollector) -> str:
         """Return `(left OR right)`."""
@@ -611,7 +634,7 @@ class Not(Expr):
 
     def __init__(self, inner: Any) -> None:
         """Build `NOT inner`."""
-        self.inner = inner
+        self.inner = _condition(inner)
 
     def compile(self, ctx: ParamCollector) -> str:
         """Return `(NOT inner)`."""

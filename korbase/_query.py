@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Generic, Optional, TypeVar, Union, overload
 
 from korbase._dialect import PG, Dialect
@@ -18,6 +19,7 @@ from korbase._expr import (
     ParamCollector,
     RelRef,
     Value,
+    _numeric_type,
     compile_expr,
 )
 from korbase._ident import KorbaseError, quote_ident
@@ -431,7 +433,7 @@ class SelectColumns(_Ordered[Any], Generic[R]):
             for col in _used_columns(item):
                 if col.table.name not in known:
                     raise KorbaseError(f"column {col.name!r} is not a column of {self._meta.name!r}")
-        plain = [c for c in self._columns if isinstance(c, Column)]
+        plain = [c for item in self._columns for c in _used_columns(item)]
         has_agg = any(isinstance(c, Aggregate) for c in self._columns)
         grouped = {(c.table.name, c.name) for c in self._group}
         if (self._group or has_agg) and any((c.table.name, c.name) not in grouped for c in plain):
@@ -555,18 +557,30 @@ class Update(_Filtered[M]):
     def set(self, **values: Any) -> Update[M]:
         """Set columns; plain values become anonymous slots."""
         self._check_columns(values)
-        for value in values.values():
+        for name, value in values.items():
             self._check_expr(value)
+            if isinstance(value, Arith):
+                self._check_arith_type(name, value)
         plain = _slots({k: v for k, v in values.items() if not isinstance(v, Expr)})
         return self._replace(_set={**self._set, **{k: plain.get(k, v) for k, v in values.items()}})
 
     def _check_expr(self, value: Any) -> None:
         """Refuse a column or arithmetic value that reads another table."""
-        if isinstance(value, Expr) and not isinstance(value, (Column, Arith)):
+        if isinstance(value, (Expr, Order)) and not isinstance(value, (Column, Arith)):
             raise KorbaseError("set() takes plain values, param(), columns or arithmetic")
         for col in _used_columns(value):
             if col.table.name != self._meta.name:
                 raise KorbaseError(f"column {col.name!r} is not a column of {self._meta.name!r}")
+
+    def _check_arith_type(self, name: str, value: Arith[Any]) -> None:
+        """Refuse arithmetic whose result type is wider than column `name`."""
+        target = _numeric_type(Column(self._meta, name))
+        got = value.py_type
+        if got is None:
+            raise KorbaseError(f"cannot check the type of the expression set on {name!r}: use a matching expression")
+        allowed = {int: (int,), float: (int, float), Decimal: (int, Decimal)}[target]
+        if got not in allowed:
+            raise KorbaseError(f"column {name!r} is {target.__name__}: it cannot be set to a {got.__name__} expression")
 
     def all_rows(self) -> Update[M]:
         """Allow the update to touch every row."""

@@ -126,3 +126,66 @@ def test_refuses_other_expressions() -> None:
         A.balance + A.balance.sum()
     with pytest.raises(KorbaseError, match="cannot be used in arithmetic"):
         A.balance + (A.balance > 1)
+
+
+NOT_COND = "not a condition"
+
+
+def test_arith_is_not_a_condition() -> None:
+    """An arithmetic expression cannot be an operand of `&`, `|` or `~`."""
+    for build in (
+        lambda: (A.balance + 7) & (A.id > 0),
+        lambda: (A.id > 0) | (A.balance + 1),
+        lambda: ~(A.balance + 1),
+    ):
+        with pytest.raises(KorbaseError, match=NOT_COND):
+            build()
+
+
+def test_arith_not_a_condition_in_having() -> None:
+    """`having` refuses the same combinations."""
+    from korbase import count, select
+
+    with pytest.raises(KorbaseError, match=NOT_COND):
+        select(Account).columns(A.balance, count()).group_by(A.balance).having((A.balance + 1) & (count() > 0))
+
+
+@table("wrapped")
+@dataclass
+class Wrapped:
+    id: Annotated[int, PK()]
+    uniq: Optional[Annotated[int, "meta"]]
+    typed: Optional[Annotated[Decimal, "meta"]]
+    flag: Optional[Annotated[bool, "meta"]]
+
+
+def test_numeric_type_unwraps_annotated_and_newtype() -> None:
+    """Optional[Annotated[...]] and NewType columns are numbers; bool stays refused."""
+    w: Any = cols(Wrapped)
+    assert (w.uniq + 1).py_type is int
+    assert (w.typed + 1).py_type is Decimal
+    with pytest.raises(KorbaseError, match="not a number"):
+        w.flag + 1
+
+
+def test_newtype_over_number() -> None:
+    """A NewType over int is read through `__supertype__`."""
+    from typing import NewType
+
+    from korbase._expr import _unwrap_number
+
+    assert _unwrap_number(NewType("Cents", int)) is int
+    assert _unwrap_number(Optional[NewType("Money", Decimal)]) is Decimal
+
+
+def test_decimal_with_float_refused() -> None:
+    """A Decimal combined with a float raises, like Python does."""
+    for build in (
+        lambda: A.price + 1.5,
+        lambda: 1.5 * A.price,
+        lambda: A.price + A.rate,
+        lambda: A.rate - Decimal(1),
+        lambda: (A.rate + 1) * A.price,
+    ):
+        with pytest.raises(KorbaseError, match="Decimal"):
+            build()

@@ -46,3 +46,13 @@ def check_arith(c: Cols) -> None:
     _ = c.s + 1  # type: ignore
     _ = c.f % 2  # type: ignore
     _ = c.n + "a"  # type: ignore
+
+
+def check_param_left(c: Cols) -> None:
+    """A Param on the left of an operator keeps the column's type."""
+    from korbase import param
+
+    assert_type(param("x") + c.n, "Arith[int]")
+    assert_type(param("x") * c.f, "Arith[float]")
+    assert_type(param("x") - c.d, "Arith[Decimal]")
+    assert_type(param("x") % c.n, "Arith[int]")
