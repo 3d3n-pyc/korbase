@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- A benchmark of korbase against raw asyncpg and raw sqlite3 (`benches/perf_check.py`), run on every pull request against its base and reported in the job summary. See `docs/benchmarks.md`. No upgrade needed.
+
 ## 0.1.0a5
 
 ### Fixed
