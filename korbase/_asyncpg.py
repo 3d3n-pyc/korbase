@@ -24,6 +24,9 @@ from korbase._errors import (
 
 __all__ = ["AsyncpgBackend"]
 
+_CLOSE_TIMEOUT = 10.0  # seconds `close()` waits for borrowed connections before terminating
+_CLOSED_WORDS = ("closed", "closing", "released")
+
 _P = ParamSpec("_P")
 _T = TypeVar("_T")
 
@@ -57,6 +60,8 @@ def _translate(exc: Exception) -> DatabaseError | None:
     import asyncpg
 
     message = _client_message(str(exc.args[0]) if exc.args else str(exc))
+    if isinstance(exc, asyncpg.ConnectionDoesNotExistError):
+        return ConnectionFailed(message)
     if isinstance(exc, asyncpg.PostgresError):
         state = getattr(exc, "sqlstate", None) or ""
         constraint = getattr(exc, "constraint_name", None)
@@ -70,7 +75,8 @@ def _translate(exc: Exception) -> DatabaseError | None:
             return ConnectionFailed(message)
         return DatabaseError(message, constraint=constraint)
     if isinstance(exc, asyncpg.InterfaceError):
-        return ConnectionFailed(message) if "closed" in message else DatabaseError(message)
+        gone = any(word in message for word in _CLOSED_WORDS)
+        return ConnectionFailed(message) if gone else DatabaseError(message)
     if isinstance(exc, asyncio.TimeoutError):
         return ConnectionFailed("the operation timed out (command, connect or acquire timeout reached)")
     if isinstance(exc, OSError):
@@ -166,8 +172,11 @@ class _AsyncpgPool:
         return _Acquire(self._pool)
 
     async def close(self) -> None:
-        """Close the pool."""
-        await self._pool.close()
+        """Close the pool; terminate it if borrowed connections are not released in time."""
+        try:
+            await asyncio.wait_for(self._pool.close(), _CLOSE_TIMEOUT)
+        except asyncio.TimeoutError:
+            self._pool.terminate()
 
 
 class _Acquire:
@@ -184,9 +193,17 @@ class _Acquire:
         self._ctx = self._pool.acquire()
         return _AsyncpgConn(await self._ctx.__aenter__())
 
-    async def __aexit__(self, *exc: Any) -> None:
-        """Release the connection."""
-        await self._ctx.__aexit__(*exc)
+    async def __aexit__(self, exc_type: Any, exc: BaseException | None, tb: Any) -> None:
+        """Release the connection; a failed release is a Korbase error, never masking the body's."""
+        try:
+            await self._ctx.__aexit__(exc_type, exc, tb)
+        except Exception as release_exc:
+            if exc is not None:
+                raise exc from None
+            err = _translate(release_exc)
+            if err is None:
+                raise
+            raise err from release_exc
 
 
 class AsyncpgBackend:
