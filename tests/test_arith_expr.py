@@ -64,8 +64,10 @@ def test_float_cast_on_postgres_only() -> None:
     assert sql(A.price + Decimal("1.5"))[0] == '("accounts"."price" + $1::numeric)'
 
 
-def test_param_gets_no_cast() -> None:
-    assert sql(A.rate - param("x")) == ('("accounts"."rate" - $1)', ["x"])
+def test_param_operand_cast() -> None:
+    """A param next to a float column gets the float cast; next to an int column, none."""
+    assert sql(A.rate - param("x")) == ('("accounts"."rate" - $1::float8)', ["x"])
+    assert sql(A.balance - param("x")) == ('("accounts"."balance" - $1)', ["x"])
 
 
 def test_comparison_and_order() -> None:
@@ -82,7 +84,7 @@ def test_decode_type() -> None:
     assert (A.balance + 1.5).py_type is float
     assert (A.balance * A.rate).py_type is float
     assert (A.price + 1).py_type is Decimal
-    assert (A.balance + param("x")).py_type is None
+    assert (A.balance + param("x")).py_type is int  # a param takes the column's type
 
 
 @pytest.mark.parametrize("name", ["flag", "name", "day", "ref"])

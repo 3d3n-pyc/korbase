@@ -362,6 +362,8 @@ by_size = await db.run(select(Line).order_by((L.qty + L.price).desc()))
 await db.run(update(Account).set(balance=A.balance * param("rate")).where(id=1), rate=2)
 ```
 
+A `param()` in arithmetic takes the type of the column beside it, and korbase checks the value you pass when the query runs. Here `balance` is an `int`, so `rate=2` works and `rate=1.5` raises `KorbaseError`: Postgres would round the result and SQLite would store a float in an integer column.
+
 ```sql
 SELECT "lines"."id", "lines"."qty", "lines"."price" FROM "lines" WHERE ("lines"."qty" * "lines"."price") > $1
 SELECT "lines"."id", ("lines"."qty" * "lines"."price") FROM "lines"
