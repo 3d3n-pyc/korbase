@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Generic, NoReturn, TypeVar, Union
+from decimal import Decimal
+from typing import TYPE_CHECKING, Annotated, Any, Generic, NoReturn, TypeVar, Union, get_args, get_origin, overload
 
-from korbase._dialect import PG, Dialect
+from korbase._dialect import PG, Dialect, _strip_optional
 from korbase._ident import KorbaseError, quote_ident, validate_ident
 from korbase._meta import RelMeta, TableMeta, table_meta
 
@@ -22,6 +23,7 @@ __all__ = [
     "Not",
     "Order",
     "Aggregate",
+    "Arith",
     "RelRef",
     "Cols",
     "ParamCollector",
@@ -33,6 +35,9 @@ __all__ = [
 
 T = TypeVar("T")
 M = TypeVar("M")
+T_co = TypeVar("T_co", covariant=True)
+N1 = TypeVar("N1", bound=None)  # carries a `None` (Optional) from the left operand
+N2 = TypeVar("N2", bound=None)  # carries a `None` (Optional) from the right operand
 
 
 class Param:
@@ -73,6 +78,7 @@ class ParamCollector:
         self.dialect = dialect
         self.items: list[Union[Param, Value]] = []
         self._named: dict[str, int] = {}
+        self.arith: dict[str, tuple[type, ...]] = {}
 
     def add(self, item: Union[Param, Value], eq: bool = False) -> str:
         """Register `item` and return its placeholder.
@@ -149,7 +155,186 @@ class Order:
         return f"{self.column.compile(ctx)} {'DESC' if self.desc else 'ASC'}"
 
 
-class Column(Expr, Generic[T]):
+_ARITH_OPS = ("+", "-", "*", "/", "%")
+_NUMBERS = (int, float, Decimal)
+_SQLITE_DECIMAL = "arithmetic on Decimal columns is not supported on SQLite, which stores them as text"
+
+
+def _unwrap_number(tp: Any) -> Any:
+    """Strip `Optional`, `Annotated` and `NewType` layers off a column type."""
+    while True:
+        tp = _strip_optional(tp)
+        if get_origin(tp) is Annotated:
+            tp = get_args(tp)[0]
+        elif hasattr(tp, "__supertype__"):
+            tp = tp.__supertype__
+        else:
+            return tp
+
+
+def _condition(node: Any) -> Any:
+    """Return `node`, refusing an arithmetic expression where a condition is needed."""
+    if isinstance(node, Arith):
+        raise KorbaseError("an arithmetic expression is not a condition; compare it, e.g. (c.a + 1) > 0")
+    return node
+
+
+def _numeric_type(column: Column[Any]) -> Any:
+    """Return the column's Python type (int, float or Decimal); refuse any other.
+
+    Returns `None` when the table has no such column. `Optional` is unwrapped.
+    """
+    for meta in column.table.columns:
+        if meta.name == column.name:
+            tp = _unwrap_number(meta.python_type)
+            if tp not in _NUMBERS:
+                name = getattr(tp, "__name__", str(tp))
+                raise KorbaseError(f"column {column.name!r} is {name}, not a number: it cannot be used in arithmetic")
+            return tp
+    return None
+
+
+def _operand_type(node: Any) -> Any:
+    """Return the number type of an arithmetic operand, `None` when unknown."""
+    if isinstance(node, Column):
+        return _numeric_type(node)
+    if isinstance(node, Arith):
+        return node.py_type
+    if isinstance(node, Expr):
+        raise KorbaseError(f"{type(node).__name__} cannot be used in arithmetic")
+    return type(node) if type(node) in _NUMBERS else None
+
+
+def _result_type(op: str, left: Any, right: Any) -> Any:
+    """Return the Python type of `left op right`, `None` when unknown.
+
+    `%` accepts integers only. A float anywhere gives a float, then a Decimal.
+    """
+    if op == "%" and (float in (left, right) or Decimal in (left, right)):
+        raise KorbaseError("% only works on integers, not floats or Decimals")
+    if {left, right} == {float, Decimal}:
+        raise KorbaseError("a Decimal cannot be combined with a float; use int or Decimal")
+    if left is None or right is None:
+        return None
+    return float if float in (left, right) else Decimal if Decimal in (left, right) else int
+
+
+def _allowed_param_types(tp: Any, dialect: Dialect) -> tuple[type, ...]:
+    """Return the Python types a param may have next to a `tp` operand."""
+    if tp is float:
+        return (int, float)
+    if tp is Decimal and dialect.name != "sqlite":
+        return (int, Decimal)
+    return (int,)
+
+
+def _arith_param(node: Param, ctx: ParamCollector, other: Any) -> str:
+    """Compile a param operand: record its allowed types, cast it on Postgres."""
+    placeholder = ctx.add(node)
+    allowed = _allowed_param_types(other, ctx.dialect)
+    known = ctx.arith.get(node.name)
+    ctx.arith[node.name] = allowed if known is None else tuple(t for t in known if t in allowed)
+    if ctx.dialect.name == "postgres" and other in (float, Decimal):
+        return placeholder + ("::float8" if other is float else "::numeric")
+    return placeholder
+
+
+def _arith_sql(node: Any, ctx: ParamCollector, other: Any = None) -> str:
+    """Compile an arithmetic operand: values go through the dialect, never inline.
+
+    `other` is the number type of the operand on the other side.
+    """
+    if isinstance(node, Column) and ctx.dialect.name == "sqlite" and _numeric_type(node) is Decimal:
+        raise KorbaseError(_SQLITE_DECIMAL)
+    if isinstance(node, Expr):
+        return node.compile(ctx)
+    if isinstance(node, Param):
+        return _arith_param(node, ctx, other)
+    return ctx.dialect.arith_operand(ctx.add(Value(node)), node)
+
+
+def _forward(op: str) -> Any:
+    """Build the method for `self op other`."""
+
+    def method(self: Any, other: Any) -> Arith[Any]:
+        """`self op other`."""
+        return Arith(op, self, other)
+
+    return method
+
+
+def _reverse(op: str) -> Any:
+    """Build the method for `other op self`."""
+
+    def method(self: Any, other: Any) -> Arith[Any]:
+        """`other op self`."""
+        return Arith(op, other, self)
+
+    return method
+
+
+if TYPE_CHECKING:
+    # Typing scheme. The operators are declared once, on `+`, and reused for
+    # `-`, `*` and `/`. Overloads, tried in order: int with int gives int; a
+    # float on either side gives float; a Decimal with int or Decimal gives
+    # Decimal. `N1`/`N2` carry `None` from an Optional column to the result.
+    # Known limit: `bool` is an `int` subclass, so pyright accepts `bool_col + 1`
+    # and `c.n + True`; at runtime both raise KorbaseError.
+    # `%` is int only; str and other combinations match nothing (type error).
+
+    class _ArithOps(Generic[T_co]):
+        @overload
+        def __add__(self: _ArithOps[int | N1], other: int | Param | _ArithOps[int | N2]) -> Arith[int | N1 | N2]: ...  # pyright: ignore[reportOverlappingOverload]
+        @overload
+        def __add__(
+            self: _ArithOps[float | N1], other: float | Param | _ArithOps[float | N2]
+        ) -> Arith[float | N1 | N2]: ...
+        @overload
+        def __add__(
+            self: _ArithOps[Decimal | N1], other: int | Decimal | Param | _ArithOps[int | Decimal | N2]
+        ) -> Arith[Decimal | N1 | N2]: ...
+        @overload
+        def __add__(
+            self: _ArithOps[int | N1], other: Decimal | _ArithOps[Decimal | N2]
+        ) -> Arith[Decimal | N1 | N2]: ...
+        def __add__(self, other: Any) -> Any: ...
+
+        __sub__ = __mul__ = __truediv__ = __add__
+
+        @overload
+        def __radd__(self: _ArithOps[int | N1], other: int | Param) -> Arith[int | N1]: ...  # pyright: ignore[reportOverlappingOverload]
+        @overload
+        def __radd__(self: _ArithOps[float | N1], other: float | Param) -> Arith[float | N1]: ...
+        @overload
+        def __radd__(self: _ArithOps[Decimal | N1], other: int | Decimal | Param) -> Arith[Decimal | N1]: ...
+        @overload
+        def __radd__(self: _ArithOps[int | N1], other: Decimal) -> Arith[Decimal | N1]: ...
+        def __radd__(self, other: Any) -> Any: ...
+
+        __rsub__ = __rmul__ = __rtruediv__ = __radd__
+
+        def __mod__(self: _ArithOps[int | N1], other: int | Param | _ArithOps[int | N2]) -> Arith[int | N1 | N2]: ...
+        def __rmod__(self: _ArithOps[int | N1], other: int | Param) -> Arith[int | N1]: ...
+
+else:
+
+    class _ArithOps(Generic[T_co]):
+        """The arithmetic operators `+ - * / %` and their reversed forms."""
+
+        __slots__ = ()
+        __add__ = _forward("+")
+        __sub__ = _forward("-")
+        __mul__ = _forward("*")
+        __truediv__ = _forward("/")
+        __mod__ = _forward("%")
+        __radd__ = _reverse("+")
+        __rsub__ = _reverse("-")
+        __rmul__ = _reverse("*")
+        __rtruediv__ = _reverse("/")
+        __rmod__ = _reverse("%")
+
+
+class Column(Expr, _ArithOps[T]):
     """A column of a table, usable in comparisons."""
 
     __slots__ = ("table", "name")
@@ -167,7 +352,7 @@ class Column(Expr, Generic[T]):
         """Hash by table and name, so columns work as dict keys."""
         return hash((self.table.name, self.name))
 
-    def __eq__(self, other: T | Column[T] | Param | None) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
+    def __eq__(self, other: T | Column[T] | Arith[T] | Param | None) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
         """`col == x` is SQL `=`; `col == None` is `IS NULL`.
 
         Only a literal `None` is rewritten. A `param(...)` always uses `=`,
@@ -177,25 +362,25 @@ class Column(Expr, Generic[T]):
             return IsNull(self, negate=False)
         return BinOp("=", self, other)
 
-    def __ne__(self, other: T | Column[T] | Param | None) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
+    def __ne__(self, other: T | Column[T] | Arith[T] | Param | None) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
         """`col != x` is SQL `<>`; `col != None` is `IS NOT NULL`."""
         if other is None:
             return IsNull(self, negate=True)
         return BinOp("<>", self, other)
 
-    def __lt__(self, other: T | Column[T] | Param) -> BinOp:
+    def __lt__(self, other: T | Column[T] | Arith[T] | Param) -> BinOp:
         """`col < x`."""
         return BinOp("<", self, other)
 
-    def __le__(self, other: T | Column[T] | Param) -> BinOp:
+    def __le__(self, other: T | Column[T] | Arith[T] | Param) -> BinOp:
         """`col <= x`."""
         return BinOp("<=", self, other)
 
-    def __gt__(self, other: T | Column[T] | Param) -> BinOp:
+    def __gt__(self, other: T | Column[T] | Arith[T] | Param) -> BinOp:
         """`col > x`."""
         return BinOp(">", self, other)
 
-    def __ge__(self, other: T | Column[T] | Param) -> BinOp:
+    def __ge__(self, other: T | Column[T] | Arith[T] | Param) -> BinOp:
         """`col >= x`."""
         return BinOp(">=", self, other)
 
@@ -309,6 +494,84 @@ class Aggregate(Expr, Generic[T]):
         return Order(self, True)
 
 
+class Arith(Expr, _ArithOps[T]):
+    """An arithmetic expression such as `cols(Account).balance - 10`.
+
+    It can be compared, sorted with `.asc()` and `.desc()`, and combined with
+    more arithmetic. `columns` lists the columns it uses and `py_type` is the
+    Python type of its result (`int`, `float` or `Decimal`), `None` if unknown.
+    """
+
+    __slots__ = ("op", "left", "right", "py_type")
+    __hash__ = Expr.__hash__
+
+    def __init__(self, op: str, left: Any, right: Any) -> None:
+        """Build `left op right`, refusing operands that are not numbers."""
+        if op not in _ARITH_OPS:
+            raise KorbaseError(f"unknown arithmetic operator {op!r}")
+        self.op = op
+        self.left = left
+        self.right = right
+        left_type, right_type = _operand_type(left), _operand_type(right)
+        if isinstance(left, Param):
+            left_type = right_type
+        elif isinstance(right, Param):
+            right_type = left_type
+        self.py_type = _result_type(op, left_type, right_type)
+
+    @property
+    def columns(self) -> tuple[Column[Any], ...]:
+        """The columns this expression reads, in order."""
+        found: list[Column[Any]] = []
+        for side in (self.left, self.right):
+            if isinstance(side, Column):
+                found.append(side)
+            elif isinstance(side, Arith):
+                found.extend(side.columns)
+        return tuple(found)
+
+    def compile(self, ctx: ParamCollector) -> str:
+        """Return `(left op right)`, always parenthesised."""
+        left = _arith_sql(self.left, ctx, _operand_type(self.right))
+        return f"({left} {self.op} {_arith_sql(self.right, ctx, _operand_type(self.left))})"
+
+    def __eq__(self, other: T | Arith[T] | Param | None) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
+        """`expr == x` is SQL `=`; `expr == None` is `IS NULL`."""
+        if other is None:
+            return IsNull(self, negate=False)
+        return BinOp("=", self, other)
+
+    def __ne__(self, other: T | Arith[T] | Param | None) -> Expr:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
+        """`expr != x` is SQL `<>`; `expr != None` is `IS NOT NULL`."""
+        if other is None:
+            return IsNull(self, negate=True)
+        return BinOp("<>", self, other)
+
+    def __lt__(self, other: T | Arith[T] | Param) -> BinOp:
+        """`expr < x`."""
+        return BinOp("<", self, other)
+
+    def __le__(self, other: T | Arith[T] | Param) -> BinOp:
+        """`expr <= x`."""
+        return BinOp("<=", self, other)
+
+    def __gt__(self, other: T | Arith[T] | Param) -> BinOp:
+        """`expr > x`."""
+        return BinOp(">", self, other)
+
+    def __ge__(self, other: T | Arith[T] | Param) -> BinOp:
+        """`expr >= x`."""
+        return BinOp(">=", self, other)
+
+    def asc(self) -> Order:
+        """Sort ascending."""
+        return Order(self, False)
+
+    def desc(self) -> Order:
+        """Sort descending."""
+        return Order(self, True)
+
+
 def count() -> Aggregate[int]:
     """SQL `count(*)`: the number of rows in each group."""
     return Aggregate("count", None)
@@ -371,8 +634,8 @@ class And(Expr):
 
     def __init__(self, left: Any, right: Any) -> None:
         """Build `left AND right`."""
-        self.left = left
-        self.right = right
+        self.left = _condition(left)
+        self.right = _condition(right)
 
     def compile(self, ctx: ParamCollector) -> str:
         """Return `(left AND right)`."""
@@ -386,8 +649,8 @@ class Or(Expr):
 
     def __init__(self, left: Any, right: Any) -> None:
         """Build `left OR right`."""
-        self.left = left
-        self.right = right
+        self.left = _condition(left)
+        self.right = _condition(right)
 
     def compile(self, ctx: ParamCollector) -> str:
         """Return `(left OR right)`."""
@@ -401,7 +664,7 @@ class Not(Expr):
 
     def __init__(self, inner: Any) -> None:
         """Build `NOT inner`."""
-        self.inner = inner
+        self.inner = _condition(inner)
 
     def compile(self, ctx: ParamCollector) -> str:
         """Return `(NOT inner)`."""

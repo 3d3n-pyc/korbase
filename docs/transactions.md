@@ -8,7 +8,7 @@ A [transaction](glossary.md#transaction) groups several statements into one unit
 
 A [savepoint](glossary.md#savepoint) is a bookmark inside a transaction. If a step fails, you go back to the bookmark and keep everything done before it. In korbase, a transaction opened inside a transaction is a savepoint.
 
-Most of the time you build queries with `select`, `insert`, `update`, `delete` and `upsert`. Use raw SQL when the query is something they cannot say, such as `balance = balance - 10` or a `CASE` expression. You lose the checks, but you can run any SQL.
+Most of the time you build queries with `select`, `insert`, `update`, `delete` and `upsert`. Arithmetic such as `balance = balance - 10` works in the builders too: see [Arithmetic](queries.md#arithmetic). Use raw SQL when the query is something they cannot say, such as a `CASE` expression. You lose the checks, but you can run any SQL.
 
 ## A first run
 
@@ -89,9 +89,20 @@ A `param` compared with `==`, `!=` or `in_()` cannot be given `None`: such a com
 `db.transaction()` opens a transaction on one connection. The block commits when it ends without an error. It rolls back when an exception leaves it, and the exception is raised again. Here is the transfer from above:
 
 ```python
+from korbase import PK, cols, table, update
+
+
+@table("accounts")
+class Account(msgspec.Struct):
+    id: Annotated[int, PK()]
+    balance: int
+
+
+A = cols(Account)
+
 async with db.transaction() as tx:
-    await tx.execute("UPDATE accounts SET balance = balance - $1 WHERE id = $2", 10, 1)
-    await tx.execute("UPDATE accounts SET balance = balance + $1 WHERE id = $2", 10, 2)
+    await tx.run(update(Account).set(balance=A.balance - 10).where(id=1))
+    await tx.run(update(Account).set(balance=A.balance + 10).where(id=2))
 ```
 
 If the second statement fails, the first is undone. A failure from the database is a korbase exception, such as `UniqueViolation` or `DatabaseBusy`: see [Errors](errors.md).

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from decimal import Decimal
 from typing import Any, Generic, Optional, TypeVar, Union, overload
 
 from korbase._dialect import PG, Dialect
 from korbase._expr import (
     Aggregate,
+    Arith,
     Column,
     Expr,
     Order,
@@ -17,6 +19,7 @@ from korbase._expr import (
     ParamCollector,
     RelRef,
     Value,
+    _numeric_type,
     compile_expr,
 )
 from korbase._ident import KorbaseError, quote_ident
@@ -72,6 +75,7 @@ class Compiled:
     slots: tuple[Slot, ...]
     outputs: tuple[Optional[Column[Any]], ...] = ()
     parts: tuple[JoinPart, ...] = ()
+    arith: tuple[tuple[str, tuple[type, ...]], ...] = ()
 
 
 class _Query(Generic[M]):
@@ -126,7 +130,7 @@ class _Query(Generic[M]):
         """Build the `Compiled` of this query for `dialect`."""
         ctx = ParamCollector(dialect)
         sql = self._build(ctx)
-        return Compiled(sql, tuple(ctx.items))
+        return Compiled(sql, tuple(ctx.items), arith=tuple(ctx.arith.items()))
 
     def _table(self) -> str:
         """Return the quoted table name."""
@@ -179,6 +183,8 @@ def _filter(query: Any, conditions: tuple[Any, ...], equals: dict[str, Any]) -> 
 
 def _cond(current: Optional[Any], expr: Any) -> Any:
     """Return `current` ANDed with `expr`; `expr` must be an expression."""
+    if isinstance(expr, Arith):
+        raise KorbaseError("an arithmetic expression is not a condition; compare it, e.g. `c.a + c.b > 3`")
     if not isinstance(expr, Expr):
         raise TypeError(f"where() takes a korbase expression, got {type(expr).__name__}")
     return expr if current is None else current & expr
@@ -205,14 +211,22 @@ def _slots(values: dict[str, Any]) -> dict[str, Slot]:
     return {k: v if isinstance(v, (Param, Value)) else Value(v) for k, v in values.items()}
 
 
+def _plain_slots(values: dict[str, Any]) -> dict[str, Slot]:
+    """Return `_slots(values)`, refusing columns and arithmetic (not allowed in inserts)."""
+    if any(isinstance(v, Expr) for v in values.values()):
+        raise KorbaseError("insert values must be plain values or param()")
+    return _slots(values)
+
+
 def _row_slots(rows: Any) -> list[dict[str, Slot]]:
     """Wrap each row's values as `Value`, all in the first row's key order."""
     if isinstance(rows, (Mapping, str, bytes)) or not isinstance(rows, Sequence):
         raise KorbaseError("rows() takes a list of dicts")
     if not all(isinstance(r, Mapping) for r in rows):
         raise KorbaseError("rows() takes a list of dicts")
-    if any(isinstance(v, (Param, Value)) for r in rows for v in r.values()):
-        raise KorbaseError("rows() takes plain values, not param()")
+    # One pass over every value: bulk inserts are the hot path here.
+    if any(isinstance(v, (Param, Value, Expr)) for r in rows for v in r.values()):
+        raise KorbaseError("rows() takes plain values, not param(), columns or arithmetic")
     if not rows:
         return []
     order = list(rows[0])
@@ -265,13 +279,13 @@ class _Ordered(_Filtered[M]):
         replaces the list. Use `group_by` and `having` on the result.
         """
         for item in items:
-            if not isinstance(item, (Column, Aggregate)):
-                raise KorbaseError(f"columns() takes columns and aggregates, got {item!r}")
+            if not isinstance(item, (Column, Aggregate, Arith)):
+                raise KorbaseError(f"columns() takes columns, aggregates and arithmetic, got {item!r}")
         new = self._become(SelectColumns)
         return new._replace(_columns=items, _group=(), _having=None)
 
 
-_Item = Union[Column[X1], Aggregate[X1]]
+_Item = Union[Column[X1], Aggregate[X1], Arith[X1]]
 
 
 def _check_orders(orders: tuple[Any, ...], allowed: tuple[type, ...]) -> None:
@@ -289,9 +303,9 @@ class Select(_Ordered[M]):
         super().__init__(model)
         self._loads: tuple[RelRef, ...] = ()
 
-    def order_by(self, *orders: Union[Column[Any], Order]) -> Select[M]:
+    def order_by(self, *orders: Union[Column[Any], Arith[Any], Order]) -> Select[M]:
         """Sort rows, using `col.asc()` or `col.desc()`."""
-        _check_orders(orders, (Column, Order))
+        _check_orders(orders, (Column, Arith, Order))
         return self._replace(_orders=self._orders + tuple(orders))
 
     def load(self, *relations: RelRef) -> Select[M]:
@@ -327,9 +341,9 @@ def _start_join(query: Any, model: type[Any], left: bool, on: Any) -> Any:
 class SelectJoin(_Ordered[Any], Generic[R]):
     """A `SELECT` over joined tables; runs as tuples of models of type `R`."""
 
-    def order_by(self, *orders: Union[Column[Any], Order]) -> SelectJoin[R]:
+    def order_by(self, *orders: Union[Column[Any], Arith[Any], Order]) -> SelectJoin[R]:
         """Sort rows, using `col.asc()` or `col.desc()`."""
-        _check_orders(orders, (Column, Order))
+        _check_orders(orders, (Column, Arith, Order))
         return self._replace(_orders=self._orders + tuple(orders))
 
     def _add_join(self, model: type[Any], left: bool, on: Any) -> Any:
@@ -358,7 +372,7 @@ class SelectJoin(_Ordered[Any], Generic[R]):
     def _compile_for(self, dialect: Dialect) -> Compiled:
         """Build the `Compiled` of this query, with the slice of each model."""
         done = super()._compile_for(dialect)
-        return Compiled(done.sql, done.slots, (), parts_of(self._meta, self._joins))
+        return replace(done, parts=parts_of(self._meta, self._joins))
 
 
 def check_query(query: Any) -> None:
@@ -392,9 +406,9 @@ class SelectColumns(_Ordered[Any], Generic[R]):
         self._group: tuple[Column[Any], ...] = ()
         self._having: Optional[Expr] = None
 
-    def order_by(self, *orders: Union[Column[Any], Aggregate[Any], Order]) -> SelectColumns[R]:
+    def order_by(self, *orders: Union[Column[Any], Aggregate[Any], Arith[Any], Order]) -> SelectColumns[R]:
         """Sort rows, using columns, aggregates, `.asc()` or `.desc()`."""
-        _check_orders(orders, (Column, Aggregate, Order))
+        _check_orders(orders, (Column, Aggregate, Arith, Order))
         return self._replace(_orders=self._orders + tuple(orders))
 
     def group_by(self, *columns: Column[Any]) -> SelectColumns[R]:
@@ -416,16 +430,17 @@ class SelectColumns(_Ordered[Any], Generic[R]):
         """Raise `KorbaseError` if the columns, grouping and `having` do not fit together."""
         if not self._columns:
             raise KorbaseError("columns() needs at least one column or aggregate")
+        known = table_names(self._meta, self._joins)
         for item in self._columns + self._group:
-            if isinstance(item, Column) and item.table.name not in table_names(self._meta, self._joins):
-                raise KorbaseError(f"column {item.name!r} is not a column of {self._meta.name!r}")
-        plain = [c for c in self._columns if isinstance(c, Column)]
+            for col in _used_columns(item):
+                if col.table.name not in known:
+                    raise KorbaseError(f"column {col.name!r} is not a column of {self._meta.name!r}")
+        plain = [c for item in self._columns for c in _used_columns(item)]
+        has_agg = any(isinstance(c, Aggregate) for c in self._columns)
         grouped = {(c.table.name, c.name) for c in self._group}
-        if (self._group or len(plain) < len(self._columns)) and any(
-            (c.table.name, c.name) not in grouped for c in plain
-        ):
+        if (self._group or has_agg) and any((c.table.name, c.name) not in grouped for c in plain):
             raise KorbaseError("a plain column must be listed in group_by() when mixed with aggregates")
-        if self._having is not None and not self._group and len(plain) == len(self._columns):
+        if self._having is not None and not self._group and not has_agg:
             raise KorbaseError("having() needs an aggregate or group_by()")
 
     def _group_sql(self, ctx: ParamCollector) -> str:
@@ -451,13 +466,22 @@ class SelectColumns(_Ordered[Any], Generic[R]):
     def _compile_for(self, dialect: Dialect) -> Compiled:
         """Build the `Compiled` of this query, with the per-item decode columns."""
         done = super()._compile_for(dialect)
-        return Compiled(done.sql, done.slots, tuple(_source(c) for c in self._columns))
+        return replace(done, outputs=tuple(_source(c) for c in self._columns))
+
+
+def _used_columns(item: Any) -> tuple[Column[Any], ...]:
+    """Return the columns a selected item reads: itself, those of arithmetic, or none."""
+    if isinstance(item, Column):
+        return (item,)
+    return item.columns if isinstance(item, Arith) else ()
 
 
 def _source(item: Any) -> Optional[Column[Any]]:
     """Return the column that decodes `item`'s value, or None for `count` and `avg`."""
     if isinstance(item, Column):
         return item
+    if isinstance(item, Arith):
+        return None
     return item.column if item.kind in ("sum", "min", "max") else None
 
 
@@ -475,7 +499,7 @@ class Insert(_Query[M]):
     def values(self: _Q, **values: Any) -> _Q:
         """Set the columns to insert; plain values become anonymous slots."""
         self._check_columns(values)  # type: ignore[attr-defined]
-        return self._replace(_values=_slots(values), _rows=None)
+        return self._replace(_values=_plain_slots(values), _rows=None)
 
     def rows(self: _Q, rows: Sequence[Mapping[str, Any]]) -> _Q:
         """Insert many rows in one statement; each row is a mapping like `.values(...)`.
@@ -535,7 +559,30 @@ class Update(_Filtered[M]):
     def set(self, **values: Any) -> Update[M]:
         """Set columns; plain values become anonymous slots."""
         self._check_columns(values)
-        return self._replace(_set={**self._set, **_slots(values)})
+        for name, value in values.items():
+            self._check_expr(value)
+            if isinstance(value, Arith):
+                self._check_arith_type(name, value)
+        plain = _slots({k: v for k, v in values.items() if not isinstance(v, Expr)})
+        return self._replace(_set={**self._set, **{k: plain.get(k, v) for k, v in values.items()}})
+
+    def _check_expr(self, value: Any) -> None:
+        """Refuse a column or arithmetic value that reads another table."""
+        if isinstance(value, (Expr, Order)) and not isinstance(value, (Column, Arith)):
+            raise KorbaseError("set() takes plain values, param(), columns or arithmetic")
+        for col in _used_columns(value):
+            if col.table.name != self._meta.name:
+                raise KorbaseError(f"column {col.name!r} is not a column of {self._meta.name!r}")
+
+    def _check_arith_type(self, name: str, value: Arith[Any]) -> None:
+        """Refuse arithmetic whose result type is wider than column `name`."""
+        target = _numeric_type(Column(self._meta, name))
+        got = value.py_type
+        if got is None:
+            raise KorbaseError(f"cannot check the type of the expression set on {name!r}: use a matching expression")
+        allowed = {int: (int,), float: (int, float), Decimal: (int, Decimal)}[target]
+        if got not in allowed:
+            raise KorbaseError(f"column {name!r} is {target.__name__}: it cannot be set to a {got.__name__} expression")
 
     def all_rows(self) -> Update[M]:
         """Allow the update to touch every row."""
@@ -551,8 +598,13 @@ class Update(_Filtered[M]):
             raise KorbaseError("update needs .set(...)")
         if self._where is None and not self._all:
             raise KorbaseError("update without where; call .all_rows() to confirm")
-        sets = ", ".join(f"{quote_ident(k)} = {ctx.add(v)}" for k, v in self._set.items())
+        sets = ", ".join(f"{quote_ident(k)} = {_set_sql(v, ctx)}" for k, v in self._set.items())
         return f"UPDATE {self._table()} SET {sets}" + _where(self, ctx) + self._tail()
+
+
+def _set_sql(value: Any, ctx: ParamCollector) -> str:
+    """Return the right side of one `SET` assignment."""
+    return compile_expr(value, ctx) if isinstance(value, Expr) else ctx.add(value)
 
 
 class UpdateReturning(Update[M]):

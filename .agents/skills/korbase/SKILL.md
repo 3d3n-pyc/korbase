@@ -81,6 +81,15 @@ call `.all_rows()`; `insert` and `upsert` need `.values(...)` or `.rows(...)`.
 `.rows([{"a": 1}, {"a": 2}])` writes many rows in one statement, in order;
 every dict has the same keys, at most 32766 values per call.
 
+Arithmetic works on numeric columns with `+ - * / %`, in `where`, `set` and
+`columns`. Integer `/` is SQL division (`7 / 2` is `3`). Not on text, bool,
+date or UUID columns, not in insert values, and no Decimal arithmetic on SQLite.
+
+```python
+c = cols(Account)
+await db.run(update(Account).set(balance=c.balance - 10).where(id=1))  # a transfer
+```
+
 Counts, sums and groups: `select(M).columns(...)` returns tuples, and
 `db.value(q)` returns one value (or `None`). Aggregates are `count()` and
 `col.count()`, `.sum()`, `.avg()` (always a float), `.min()`, `.max()`.
