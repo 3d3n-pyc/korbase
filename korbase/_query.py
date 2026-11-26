@@ -224,12 +224,13 @@ def _row_slots(rows: Any) -> list[dict[str, Slot]]:
         raise KorbaseError("rows() takes a list of dicts")
     if not all(isinstance(r, Mapping) for r in rows):
         raise KorbaseError("rows() takes a list of dicts")
-    if any(isinstance(v, (Param, Value)) for r in rows for v in r.values()):
-        raise KorbaseError("rows() takes plain values, not param()")
+    # One pass over every value: bulk inserts are the hot path here.
+    if any(isinstance(v, (Param, Value, Expr)) for r in rows for v in r.values()):
+        raise KorbaseError("rows() takes plain values, not param(), columns or arithmetic")
     if not rows:
         return []
     order = list(rows[0])
-    return [_plain_slots({k: r[k] for k in order if k in r} | {k: r[k] for k in r if k not in order}) for r in rows]
+    return [_slots({k: r[k] for k in order if k in r} | {k: r[k] for k in r if k not in order}) for r in rows]
 
 
 class _Ordered(_Filtered[M]):

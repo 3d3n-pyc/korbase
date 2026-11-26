@@ -68,7 +68,7 @@ def test_insert_refuses_expr() -> None:
     for q in (insert(Account), upsert(Account)):
         with pytest.raises(KorbaseError, match="plain values or param"):
             q.values(balance=A.qty + 1)
-        with pytest.raises(KorbaseError, match="plain values or param"):
+        with pytest.raises(KorbaseError, match="not param\\(\\), columns or arithmetic"):
             q.rows([{"balance": A.qty}])
 
 
